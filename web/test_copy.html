@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Copy Test</title></head>
+<body>
+<h2>点击测试复制</h2>
+<p onclick="copyText('测试文字123')" style="cursor:pointer;background:#eef4ff;padding:10px;">点这里复制 "测试文字123"</p>
+<p id="msg"></p>
+<script>
+function copyText(text) {
+  var ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;top:0;left:0;width:2px;height:2px;padding:0;border:none;outline:none;box-shadow:none;background:transparent;z-index:9999";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  ta.setSelectionRange(0, 99999);
+  var ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) {}
+  document.body.removeChild(ta);
+  document.getElementById("msg").textContent = ok ? "复制成功！可以粘贴了" : "复制失败";
+}
+</script>
+</body></html>

@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>客诉内部处理表</title>
+<style>
+  :root { --ai:#2b579a; --gao:#c55a11; }
+  * { box-sizing:border-box; }
+  body { font-family:"Microsoft YaHei",sans-serif; margin:0; background:#f5f6fa; color:#333; font-size:12px; }
+  .top { background:linear-gradient(90deg,#2b579a,#1f3f6e); color:#fff; padding:10px 14px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  .top h1 { font-size:17px; margin:0; }
+  .stats { font-size:12px; display:flex; gap:10px; flex-wrap:wrap; }
+  .stats b { color:#ffd966; }
+  .syncbar { padding:8px 14px; background:#eef2fa; border-bottom:1px solid #d5dceb; display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:12px; }
+  .syncbar .grp { display:flex; align-items:center; gap:5px; background:#fff; padding:4px 8px; border:1px solid #ccd4e6; border-radius:5px; }
+  .syncbar input[type=number] { width:76px; padding:4px 5px; border:1px solid #bbb; border-radius:4px; }
+  .syncbar button { padding:5px 12px; background:#2b579a; color:#fff; border:0; border-radius:4px; cursor:pointer; }
+  .syncbar button.alt { background:#fff; color:#2b579a; border:1px solid #2b579a; }
+  .syncbar button:disabled { background:#9aa7c4; cursor:not-allowed; }
+  .syncmsg { padding:4px 14px; font-size:12px; color:#1a6d1a; }
+  .filters { padding:8px 14px; background:#fff; border-bottom:1px solid #e3e6ea; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .filters select,.filters input { padding:5px 7px; border:1px solid #ccc; border-radius:4px; font-size:12px; }
+  .filters button { padding:5px 12px; background:#2b579a; color:#fff; border:0; border-radius:4px; cursor:pointer; font-size:12px; }
+  .filters button.alt { background:#fff; color:#2b579a; border:1px solid #2b579a; }
+  .pager { padding:6px 14px; font-size:12px; color:#888; }
+  .pager button { margin-left:6px; }
+  .wrap { padding:8px 14px; }
+  table { width:100%; border-collapse:collapse; background:#fff; font-size:11.5px; table-layout:fixed; }
+  th,td { border:1px solid #e3e6ea; padding:5px 4px; text-align:left; vertical-align:middle; overflow:hidden; }
+  th { background:#eef1f7; position:sticky; top:0; z-index:2; white-space:nowrap; font-size:11.5px; }
+  td.info { white-space:pre-line; line-height:1.4; font-size:11px; word-break:break-all; }
+  td.cat { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  tr.special td { background:#fff7e6; }
+  tr.not_found td { background:#fff6d8; }
+  tr.not_found td.period { background:#fde9b3; font-weight:700; color:#8a6d00; }
+  tr.filled td { background:#f2fbf2; }
+  tr.srcfilled td { background:#e9f7ef; }
+  .badge { display:inline-block; padding:1px 7px; border-radius:3px; color:#fff; font-size:11px; }
+  .badge.ai { background:var(--ai); } .badge.gao { background:var(--gao); }
+  .badge.src { background:#2e8b57; }
+  .procbtn { padding:3px 10px; border:1px solid #bbb; border-radius:3px; font-size:12px; cursor:pointer; background:#fff; }
+  .procbtn.yes { background:#2b579a; color:#fff; border-color:#2b579a; }
+  .order { font-family:Consolas,monospace; font-size:10.5px; word-break:break-all; }
+  .fb { width:100%; min-height:22px; border:1px solid transparent; border-radius:3px; font-size:11px; resize:none; background:transparent; font-family:inherit; }
+  .fb:focus { border-color:#2b579a; background:#fff; outline:none; }
+  .rmk { width:100%; padding:2px 3px; border:1px solid #ccc; border-radius:3px; font-size:11px; }
+  .copyable { cursor:pointer; }
+  .copyable:hover { background:#eef4ff; }
+  .talkcell { cursor:pointer; }
+  .talkcell:hover { background:#eef4ff; }
+  .tk { white-space:pre-line; line-height:1.45; font-size:11px; word-break:break-all; }
+  .tk .t-talk { color:#1a6d1a; }
+  .talk-wrap { display:flex; align-items:flex-start; gap:5px; }
+  .tkwrap { flex:1 1 auto; }
+  .genbtn { flex:0 0 auto; padding:2px 7px; border:1px solid #bbb; border-radius:3px; background:#eee; color:#888; font-size:11px; cursor:pointer; white-space:nowrap; }
+  .genbtn.on { background:#2e8b57; color:#fff; border-color:#2e8b57; }
+  .genbtn-all { padding:1px 6px; border:1px solid #bbb; border-radius:3px; background:#eee; color:#888; font-size:10.5px; cursor:pointer; margin-left:4px; vertical-align:middle; }
+  .genbtn-all.on { background:#2e8b57; color:#fff; border-color:#2e8b57; }
+
+  .footer { padding:6px 14px; color:#888; font-size:11.5px; }
+  col.c-info { width:26%; } col.c-cat { width:8%; } col.c-fb { width:14%; }
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>客诉内部处理表</h1>
+  <div class="stats" id="stats"></div>
+</div>
+<div class="syncbar">
+  <div class="grp"><span class="badge ai">AI表</span> 从第 <input type="number" id="aiStart" min="3" placeholder="如 10880"> 行及以下 <button id="btnSyncAI" onclick="doSync('AI')">同步并查询</button></div>
+  <div class="grp"><span class="badge gao">高表</span> 从第 <input type="number" id="gaoStart" min="3" placeholder="如 2707"> 行及以下 <button id="btnSyncGao" onclick="doSync('高')">同步并查询</button></div>
+  <div class="grp"><button class="alt" onclick="doQuery()">查询补全(当前表)</button></div>
+  <div class="grp"><button class="alt" id="btnBatchAI" onclick="batchFill('AI')">批量回填(AI表)</button></div>
+  <div class="grp"><button class="alt" id="btnBatchGao" onclick="batchFill('高')">批量回填(高表)</button></div>
+  <div class="grp"><button class="alt" onclick="load(PAGE,true)">刷新列表</button></div><div class="grp"><button style="background:#c0392b;color:#fff;border:0;border-radius:4px;padding:5px 12px;cursor:pointer" onclick="resetTable()">重置(清空恢复空白)</button></div>
+</div>
+<div class="syncmsg" id="syncmsg"></div>
+<div class="filters">
+  <select id="fSheet"><option value="AI" selected>AI表</option><option value="高">高表</option></select>
+  <select id="fStatus"><option value="">全部状态</option><option value="pending">待补全</option><option value="filled">已补全</option><option value="special">特殊单</option><option value="not_found">系统未掉落</option></select>
+  <select id="fProcessed"><option value="">全部处理</option><option value="是">已处理(是)</option><option value="否">未处理</option></select>
+  <input id="fQ" placeholder="搜索 订单号/内容/诉求">
+  <button onclick="load(0)">查询</button>
+  <span id="count" style="color:#888;font-size:12px"></span>
+</div>
+<div class="pager" id="pager"></div>
+<div class="wrap">
+  <table>
+    <colgroup>
+      <col style="width:4%"><col style="width:5%"><col style="width:6%"><col class="c-info"><col class="c-cat">
+      <col style="width:5.5%"><col style="width:8%"><col style="width:8%"><col style="width:6.5%"><col style="width:10%"><col style="width:8%">
+      <col style="width:6%"><col class="c-fb"><col style="width:7%">
+    </colgroup>
+    <thead><tr>
+      <th>表</th><th>源表行</th><th>反馈时间</th><th>客户信息及反馈</th><th>问题归类</th>
+      <th>期次</th><th>手机号</th><th>顾问</th><th>是否处理</th><th>话术 <button id="genAllBtn" class="genbtn-all" onclick="toggleTalkGenAll(this)" title="批量生成/撤销全部话术">生成</button></th><th>处理时间</th><th>备注</th><th>顾问反馈</th><th>回写源表</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+<div class="footer">点"同步并查询"= 把源表该行号及以下的新数据拉进来并自动查询补全；黄色行=系统未掉落；绿色行=源表已填期次/手机号/顾问（默认已处理）。</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+const CAT_COLORS = { "未收到通知":"#F88825","正价退费纠纷":"#F88825","投诉助教服务":"#F88825","更换通知方式":"#F88825","承诺资料未给":"#FF0000","用户主动添加不成功":"#8CDDFA" };
+let PAGE = 0; const PAGE_SIZE = 300;
+let syncing = false;
+
+async function stats() {
+  try {
+    const d = await (await fetch("/api/stats")).json();
+    const map = {}; d.status.forEach(s=>map[s.query_status]=s.n);
+    const pmap = {}; d.processed.forEach(s=>pmap[s.processed]=s.n);
+    const ss = d.syncState || {};
+    let syncInfo = "";
+    if (ss.AI && ss.AI.lastRow) syncInfo += ` | AI已同步到 ${ss.AI.lastRow} 行`;
+    if (ss["高"] && ss["高"].lastRow) syncInfo += ` | 高已同步到 ${ss["高"].lastRow} 行`;
+    $("stats").innerHTML = `共 <b>${d.total}</b> 条 | 待补全 <b>${map.pending||0}</b> | 已补全 <b>${map.filled||0}</b> | 特殊 <b>${map.special||0}</b> | 未掉落 <b>${map.not_found||0}</b> | 已处理 <b>${pmap["是"]||0}</b><span style="color:#cfe0ff">${syncInfo}</span>`;
+  } catch(e){}
+}
+function qs() {
+  const p = new URLSearchParams();
+  if ($("fSheet").value) p.set("sheet", $("fSheet").value);
+  if ($("fStatus").value) p.set("status", $("fStatus").value);
+  if ($("fProcessed").value) p.set("processed", $("fProcessed").value);
+  if ($("fQ").value.trim()) p.set("q", $("fQ").value.trim());
+  p.set("limit", String(PAGE_SIZE)); p.set("offset", String(PAGE * PAGE_SIZE));
+  return p.toString();
+}
+let TALK_CFG = null;
+async function loadTalkCfg() {
+  try { const r = await fetch("/api/config", { cache: "no-store" }); TALK_CFG = await r.json(); } catch (e) { TALK_CFG = {}; }
+}
+function extractCourse(ci) {
+  const lines = String(ci || "").split(/\n+/).map(s => s.trim()).filter(Boolean);
+  const re = /(升初一|升初二|升初三|升高一|升高二|升高三|老梦|梦亚|果冻|清北|初一|初二|初三|高一|高二|高三|长期|短期|寒假|暑假|春季|秋季)/;
+  const hit = lines.find(l => re.test(l) && !/^\d+$/.test(l) && !/\d{10,}/.test(l));
+  return hit ? hit.replace(/\+$/, "").trim() : "";
+}
+function extractNewContact(ci) {
+  const s = String(ci || "");
+  const m = s.match(/更换通知方式\s*(\d{6,})/) || s.match(/通知\s*(\d{6,})/);
+  return m ? m[1] : "";
+}
+﻿function extractProblem(ci) {
+  const lines = String(ci || "").split(/\n+/).map(s => s.trim()).filter(Boolean);
+  const last = lines[lines.length - 1] || "";
+  return last.replace(/\+$/, "").trim();
+}
+function talkBlock(row) {
+  const st = row.query_status || "";
+  const cat = row.category || "";
+  const remark = row.query_remark || "";
+  const period = row.fill_period || row.src_period || "";
+  const phone = row.fill_phone || row.src_phone || "";
+  const tutor = row.fill_tutor || row.src_tutor || "";
+  const isNotFound = st === "not_found" || period === "系统未掉落";
+  const isSpecial = st === "special" || remark.includes("爱芯过滤") || remark.includes("正价课拦截") || cat.includes("爱芯过滤") || cat.includes("正价课拦截");
+  // 无具体助教（未掉落/过滤/正价课拦截/空助教）或缺期次/电话 → 不需要话术
+  if (isNotFound || isSpecial || !tutor || !period || !phone) return "";
+  const course = extractCourse(row.customer_info);
+  const oldNote = (TALK_CFG && TALK_CFG.periodRule && TALK_CFG.periodRule.oldNote) || "二转";
+  const isSecond = tutor === oldNote;
+  const tmpl = (TALK_CFG && TALK_CFG.talkScripts || {})[cat];
+  let periodLine = period;
+  let talk;
+  if (isSecond) {
+    // 二转话术 = 客户信息里客服提交的具体问题 + 空格 + 二转（如：未收到通知 二转）
+    const problem = extractProblem(row.customer_info) || cat;
+    talk = problem + " " + oldNote;
+  } else if (tmpl) {
+    let newContact = extractNewContact(row.customer_info);
+    // 更换联系方式类：客服给的新电话与登记电话一致（或没给新号）→ 期次行标注（电话无误）
+    if ((cat === "更换通知方式" || cat === "更换联系方式") && (!newContact || newContact === phone)) {
+      periodLine = period + "（电话无误）";
+      newContact = phone;
+    }
+    talk = String(tmpl)
+      .replace(/\{期次\}/g, period)
+      .replace(/\{电话\}/g, phone)
+      .replace(/\{手机号\}/g, phone)
+      .replace(/\{课程\}/g, course)
+      .replace(/\{新联系方式\}/g, newContact);
+  } else {
+    return "";  // 少见分类无模板 → 留空，人工处理
+  }
+  // 期次/电话/话术 必有；课程缺失则省略课程行
+  let html = esc(periodLine) + '<br>' + esc(phone);
+  if (course) html += '<br>' + esc(course);
+  html += '<br><span class="t-talk">' + esc(talk) + '</span>';
+  return '<div class="tk">' + html + '</div>';
+}
+
+﻿async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    setMsg("已复制：" + String(text).split("\n")[0].slice(0, 24), "#1a6d1a");
+  } catch (e) { setMsg("复制失败，请手动选择复制", "#c0392b"); }
+}
+function copyCell(el) { copyText((el.innerText || "").trim()); }
+function copyTalk(el) {
+  const tk = el.querySelector(".tk");
+  const wrap = el.querySelector(".tkwrap");
+  if (!tk || (wrap && getComputedStyle(wrap).display === "none")) { setMsg("请先点“生成”再复制话术", "#c0392b"); return; }
+  copyText((tk.innerText || "").trim());
+}
+async function refreshGenAll() {
+  try {
+    const r = await fetch("/api/talkgenall", { cache: "no-store" });
+    const d = await r.json();
+    const btn = document.getElementById("genAllBtn");
+    if (btn) {
+      btn.classList.toggle("on", !!d.allOn);
+      btn.textContent = d.allOn ? "生成✓" : "生成";
+      btn.title = d.allOn ? "已全部生成（点一下撤销）" : "批量生成全部话术（" + (d.total || 0) + " 条可生成）";
+    }
+  } catch (e) {}
+}
+async function toggleTalkGenAll(el) {
+  const on = el.classList.contains("on") ? 0 : 1;
+  try {
+    const r = await fetch("/api/talkgenall", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({on}) });
+    const d = await r.json();
+    el.classList.toggle("on", !!on);
+    el.textContent = on ? "生成✓" : "生成";
+    setMsg(on ? ("已批量生成 " + (d.generated || 0) + " 条话术（绿色）") : "已全部撤销话术（灰色）", on ? "#1a6d1a" : "#888");
+    load(PAGE, true);
+    refreshGenAll();
+  } catch (e) { setMsg("操作失败: " + e.message, "#c0392b"); }
+}
+function wbBadge(row) {
+  const s = row.writeback_status || "";
+  const at = row.writeback_at ? `<div style="font-size:10px;color:#aaa">${esc(row.writeback_at)}</div>` : "";
+  const msg = row.writeback_msg ? ` title="${esc(row.writeback_msg)}"` : "";
+  const map = {
+    "": '<span style="color:#bbb">—</span>',
+    "ok": `<span style="color:#1a6d1a;font-weight:700"${msg}>已回写</span>`,
+    "fail": `<span style="color:#c0392b;font-weight:700;cursor:help"${msg}>失败</span>`,
+    "dry_ok": `<span style="color:#999"${msg}>已定位</span>`,
+    "running": '<span style="color:#2b579a">回写中…</span>'
+  };
+  return (map[s] || esc(s)) + at;
+}
+async function load(offset, noCache) {
+  if (offset !== undefined) PAGE = Math.max(0, offset);
+  const r = await fetch("/api/records?" + qs(), { cache: noCache ? "no-store" : "default" });
+  const d = await r.json();
+  const total = d.total;
+  $("count").textContent = `共 ${total} 条（显示第 ${PAGE*PAGE_SIZE+1}-${Math.min((PAGE+1)*PAGE_SIZE,total)} 条）`;
+  $("pager").innerHTML = `<button onclick="load(0)">首页</button><button onclick="load(${PAGE-1})">上一页</button>第 ${PAGE+1} 页<button onclick="load(${PAGE+1})">下一页</button>`;
+  const tb = $("tbody"); tb.innerHTML = "";
+  for (const row of d.rows) {
+    const tr = document.createElement("tr");
+    if (row.is_blank || row.query_status === "blank") {
+      tr.style.background = "#f7f7f7";
+      tr.innerHTML = `
+      <td><span class="badge ${row.sheet==="AI"?"ai":"gao"}">${esc(row.sheet)}</span></td>
+      <td style="color:#bbb">${row.src_row}</td>
+      <td colspan="4" style="color:#bbb">空白行（无信息，占一行）</td>
+      <td colspan="8" style="color:#bbb;font-size:11px">— 不处理 —</td>`;
+      tb.appendChild(tr);
+      continue;
+    }
+    tr.className = (row.query_status === "not_found" ? "not_found " : "") + row.query_status + (row.query_remark === "源表已填" ? " srcfilled" : "");
+    const catColor = CAT_COLORS[row.category] || "";
+    const catStyle = catColor ? `style="background:${catColor};color:#fff"` : "";
+    const fbVal = row.feedback_text || row.src_feedback || "";
+    const srcBadge = row.query_remark === "源表已填" ? ' <span class="badge src">源表已填</span>' : "";
+    tr.innerHTML = `
+      <td><span class="badge ${row.sheet==="AI"?"ai":"gao"}">${esc(row.sheet)}</span></td>
+      <td>${row.src_row}${row.mismatch ? (row.writeback_msg === "源表待填"
+        ? ' <span style="color:#e67e22;font-weight:700;cursor:help" title="源表待填：网页已生成期次/电话/助教，尚未写入源表">⚠待填</span>'
+        : ' <span style="color:#c0392b;font-weight:700;cursor:help" title="源表已有不同内容，与网页不一致">⚠不一致</span>') : ''}</td>
+      <td>${esc(row.feedback_date)}</td>
+      <td class="info">${esc(row.customer_info)}</td>
+      <td class="cat" ${catStyle}>${esc(row.category)}</td>
+      <td class="period copyable" onclick="copyCell(this)" title="点击复制">${esc(row.fill_period || row.src_period || "")}${row.query_status==="not_found"?' <span style="color:#c0392b;font-weight:700">[未掉落]</span>':""}</td>
+      <td class="order copyable" onclick="copyCell(this)" title="点击复制">${esc(row.fill_phone || row.src_phone || "")}</td>
+      <td class="copyable" onclick="copyCell(this)" title="点击复制">${esc(row.fill_tutor || row.src_tutor || "")}${srcBadge}</td>
+      <td><button class="procbtn ${row.processed==="是"?"yes":""}" data-id="${row.id}" onclick="toggleProcessed(this)">${row.processed==="是"?"是":"否"}</button></td>
+      <td class="talkcell" onclick="copyTalk(this)" title="点击复制话术"><div class="tkwrap" style="display:${row.talk_generated?'':'none'}">${talkBlock(row)}</div></td>
+      <td>${esc(row.processed_at)}</td>
+      <td><input class="rmk" value="${esc(row.internal_remark)}" data-id="${row.id}" onchange="saveRemark(this)"></td>
+      <td><textarea class="fb" data-id="${row.id}" oninput="debounceFeedback(this)" onchange="saveFeedback(this)" placeholder="顾问反馈...">${esc(fbVal)}</textarea></td>
+      <td>${wbBadge(row)}</td>`;
+    tb.appendChild(tr);
+  }
+  try { localStorage.setItem("kehu_ui", JSON.stringify({sheet:$("fSheet").value,status:$("fStatus").value,processed:$("fProcessed").value,q:$("fQ").value,page:PAGE})); } catch(e){}
+  stats();
+}
+async function toggleProcessed(el) {
+  const val = el.classList.contains("yes") ? "否" : "是";
+  const r = await fetch("/api/process", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id:Number(el.dataset.id), processed:val}) });
+  const d = await r.json();
+  el.classList.toggle("yes", val === "是");
+  el.textContent = val;
+  if (val === "是") {
+    if (d.writeback === "started") { setMsg("已标记处理，正在后台回写源表 E/F/G（自动刷新中，请留意“回写源表”列）"); startPoll(); }
+    else setMsg("已标记处理（回写未开启，可在 config.json 打开）");
+  } else {
+    setMsg("已取消处理");
+  }
+  load(PAGE);
+}
+async function saveRemark(el) {
+  await fetch("/api/remark", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id:Number(el.dataset.id), remark:el.value}) });
+}
+async function saveTalk(el) {
+  await fetch("/api/talk", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id:Number(el.dataset.id), text:el.value}) });
+  el.style.borderColor = "#4c9a4c";
+  setTimeout(() => el.style.borderColor = "", 1200);
+}
+let fbTimer = {};
+let pollTimer = null, quietPoll = 0;
+// 自动刷新轮询：同步/查询/回写进行中每5秒刷新一次列表，完成后显示"已完成"
+async function pollStatus() {
+  try {
+    const r = await fetch("/api/status", { cache: "no-store" });
+    const d = await r.json();
+    const filled = d.filled || 0, total = d.total || 0, pending = d.pending || 0;
+    const records = d.records || total;                       // 只算真实记录，不算空白占位行
+    const blanks = Math.max(0, total - records);
+    if (d.running) {
+      quietPoll = 0;
+      setMsg((d.type || "任务") + " 进行中… 已补全 " + filled + "/" + records + (blanks ? "（另有 " + blanks + " 行空白）" : "") + "（自动刷新中）", "#2b579a");
+      load(PAGE, true);
+    } else {
+      quietPoll++;
+      if (quietPoll >= 2) {
+        setMsg("已完成：" + (d.type || "任务") + "，已补全 " + filled + "/" + records + (blanks ? "（另有 " + blanks + " 行空白）" : "") + "，待补全 " + pending, "#1a6d1a");
+        load(PAGE, true);
+        stopPoll();
+      } else {
+        load(PAGE, true);
+      }
+    }
+  } catch (e) {}
+}
+function startPoll() { stopPoll(); quietPoll = 0; pollTimer = setInterval(pollStatus, 5000); }
+function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+function debounceFeedback(el) {
+  clearTimeout(fbTimer[el.dataset.id]);
+  fbTimer[el.dataset.id] = setTimeout(() => saveFeedback(el), 600);
+}
+async function saveFeedback(el) {
+  const r = await fetch("/api/feedback", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id:Number(el.dataset.id), text:el.value}) });
+  const d = await r.json();
+  el.style.borderColor = "#4c9a4c";
+  setTimeout(() => el.style.borderColor = "", 1200);
+  if (d.writeback === "started") { setMsg("反馈已保存，正在后台回写源表 H/I（自动刷新中）"); startPoll(); }
+}
+function setMsg(m, color) { const el = $("syncmsg"); el.textContent = m; el.style.color = color || "#1a6d1a"; }
+async function doSync(sheet) {
+  const input = sheet === "AI" ? $("aiStart") : $("gaoStart");
+  const startRow = Number(input.value);
+  if (!startRow || startRow < 3) { setMsg("请先输入起始行号（>=3），如 " + (sheet === "AI" ? "10870" : "2707"), "#c0392b"); return; }
+  if (syncing) { setMsg("已有同步/查询在进行中，请稍候...", "#c0392b"); return; }
+  syncing = true;
+  $("btnSyncAI").disabled = true; $("btnSyncGao").disabled = true;
+  setMsg((sheet === "AI" ? "AI表" : "高表") + " 正在从第 " + startRow + " 行同步（约1分钟，请勿关闭页面）...");
+  try {
+    const r = await fetch("/api/sync", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sheet, startRow}) });
+    const d = await r.json();
+    const lines = (d.result && d.result.log) || [];
+    const summary = lines.join(" | ");
+    setMsg((sheet === "AI" ? "AI表" : "高表") + " 同步完成：" + (summary || "（无输出）") + "（查询补全已后台开始，自动刷新中）");
+    await new Promise(r2 => setTimeout(r2, 1200));
+    load(0, true);
+    startPoll();
+  } catch (e) {
+    setMsg("同步失败: " + e.message, "#c0392b");
+  } finally {
+    syncing = false;
+    $("btnSyncAI").disabled = false; $("btnSyncGao").disabled = false;
+  }
+}
+async function resetTable() {
+  if (!confirm("???????????????????????")) return;
+  setMsg("????...");
+  try {
+    await fetch("/api/reset", { method:"POST", headers:{"Content-Type":"application/json"}, body: "{}" });
+    setMsg("???????????");
+    load(0, true);
+  } catch (e) { setMsg("????: " + e.message, "#c0392b"); }
+}
+async function doQuery() {
+  const sheet = $("fSheet").value || "AI";
+  if (syncing) { setMsg("已有操作进行中，请稍候...", "#c0392b"); return; }
+  syncing = true;
+  $("btnSyncAI").disabled = true; $("btnSyncGao").disabled = true;
+  setMsg((sheet === "AI" ? "AI表" : "高表") + " 查询补全已开始（几分钟），自动刷新中...", "#2b579a");
+  try {
+    await fetch("/api/query", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sheet}) });
+    startPoll();
+  } catch (e) { setMsg("查询请求失败: " + e.message, "#c0392b"); syncing = false; $("btnSyncAI").disabled = false; $("btnSyncGao").disabled = false; }
+}
+async function batchFill(sheet) {
+  if (syncing) { setMsg("已有操作进行中，请稍候...", "#c0392b"); return; }
+  syncing = true;
+  $("btnSyncAI").disabled = true; $("btnSyncGao").disabled = true;
+  if ($("btnBatchAI")) $("btnBatchAI").disabled = true;
+  if ($("btnBatchGao")) $("btnBatchGao").disabled = true;
+  setMsg((sheet === "AI" ? "AI表" : "高表") + " 批量检查中（核对起始/最底/中间行的行号与订单号）...", "#2b579a");
+  try {
+    const r = await fetch("/api/writeback-all", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sheet, phase:"check"}) });
+    const d = await r.json();
+    const res = d.result || d;
+    if (res.needWait) {
+      setMsg("还有 " + (res.pending || 0) + " 条信息未生成完（待补全），请等待查询补全完成后（待补全=0）再批量回填", "#c0392b");
+      return;
+    }
+    if (res.ok && res.phase === "check") {
+      setMsg("核对通过：顶" + res.top + " / 中" + res.middle + " / 底" + res.bottom + " 行号与订单号均与源表一致（共 " + res.N + " 条记录）", "#1a6d1a");
+      if (confirm("核对通过：第 " + res.top + " - " + res.bottom + " 行（共 " + res.N + " 条记录），起始/最底/中间行的行号与订单号与源表一致。\n\n是否执行批量回填？将把网页的期次/电话/助教整体覆盖到源表对应行。\n选“是”执行，选“否”取消。")) {
+        await batchFillExec(sheet);
+      } else {
+        setMsg("已取消批量回填", "#888");
+      }
+    } else {
+      setMsg("批量检查失败：" + (res.reason || "未知错误"), "#c0392b");
+    }
+  } catch (e) {
+    setMsg("批量检查请求失败: " + e.message, "#c0392b");
+  } finally {
+    syncing = false;
+    $("btnSyncAI").disabled = false; $("btnSyncGao").disabled = false;
+    if ($("btnBatchAI")) $("btnBatchAI").disabled = false;
+    if ($("btnBatchGao")) $("btnBatchGao").disabled = false;
+  }
+}
+async function batchFillExec(sheet) {
+  syncing = true;
+  $("btnSyncAI").disabled = true; $("btnSyncGao").disabled = true;
+  if ($("btnBatchAI")) $("btnBatchAI").disabled = true;
+  if ($("btnBatchGao")) $("btnBatchGao").disabled = true;
+  setMsg((sheet === "AI" ? "AI表" : "高表") + " 批量回填执行中（粘贴+末尾校验，自动刷新）...", "#2b579a");
+  try {
+    const r = await fetch("/api/writeback-all", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sheet, phase:"exec"}) });
+    const d = await r.json();
+    const res = d.result || d;
+    if (res.ok && res.phase === "exec") {
+      setMsg("批量回填成功：已写入 " + (res.written || 0) + " 条记录（第" + res.top + "-" + res.bottom + " 行），末尾校验通过", "#1a6d1a");
+    } else {
+      setMsg("批量回填" + (res.rolledBack ? "失败但已撤销粘贴" : "未执行") + "：" + (res.reason || "未知原因"), "#c0392b");
+    }
+    load(0, true);
+    startPoll();
+  } catch (e) {
+    setMsg("批量回填请求失败: " + e.message, "#c0392b");
+  } finally {
+    syncing = false;
+    $("btnSyncAI").disabled = false; $("btnSyncGao").disabled = false;
+    if ($("btnBatchAI")) $("btnBatchAI").disabled = false;
+    if ($("btnBatchGao")) $("btnBatchGao").disabled = false;
+  }
+}
+["fSheet","fStatus","fProcessed"].forEach(id => $(id).addEventListener("change", () => load(0)));
+$("fQ").addEventListener("keydown", e => { if (e.key === "Enter") load(0); });
+$("aiStart").addEventListener("keydown", e => { if (e.key === "Enter") doSync("AI"); });
+$("gaoStart").addEventListener("keydown", e => { if (e.key === "Enter") doSync("高"); });
+try {
+  const saved = JSON.parse(localStorage.getItem("kehu_ui") || "{}");
+  if (saved.sheet) $("fSheet").value = saved.sheet;
+  if (saved.status) $("fStatus").value = saved.status;
+  if (saved.processed) $("fProcessed").value = saved.processed;
+  if (saved.q) $("fQ").value = saved.q;
+  PAGE = Number(saved.page) || 0;
+} catch(e){}
+loadTalkCfg();
+refreshGenAll();
+load(PAGE);
+</script>
+</body>
+</html>
+
+

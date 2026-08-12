@@ -1,0 +1,74 @@
+{
+  "profileDir": "profile",
+  "dataDir": "data",
+  "sites": {
+    "aiDuola": {
+      "name": "AI站(ai-duola)",
+      "url": "https://ai-duola.yuaiweiwu.com/#/clue/index",
+      "host": "ai-duola.yuaiweiwu.com",
+      "check": "host"
+    },
+    "duola": {
+      "name": "高中站(duola)",
+      "url": "https://duola.yuaiweiwu.com/#/clue/index",
+      "host": "duola.yuaiweiwu.com",
+      "check": "host"
+    },
+    "tencentDoc": {
+      "name": "腾讯文档(客诉表)",
+      "url": "https://docs.qq.com/sheet/DWGRyUkJtamNpdFJk?tab=ee5hin",
+      "check": "text",
+      "loggedOutText": "登录腾讯文档",
+      "padId": "YOUR_PAD_ID",
+      "subId": "YOUR_SUB_ID"
+    }
+  },
+  "sheetSite": {
+    "AI": "aiDuola",
+    "高": "duola"
+  },
+  "web": {
+    "port": 8766
+  },
+  "writeback": {
+    "auto": true,
+    "maxLen": 500,
+    "feedbackCols": {
+      "AI": "H",
+      "高": "I"
+    }
+  },
+  "dingtalk": {
+    "enabled": true,
+    "autoSendOnWriteback": true,
+    "binPath": "C:/Users/YOUR_USERNAME/AppData/Roaming/npm/dws.cmd",
+    "emailDomain": "yuaiweiwu.com",
+    "messageTemplate": "{fill_period}\n{课程}\n{fill_phone}\n{talk_script}"
+  },
+  "rules": {
+    "notFoundPeriod": "系统未掉落",
+    "specialKeywords": [
+      "爱芯过滤",
+      "正价课拦截"
+    ]
+  },
+  "periodRule": {
+    "enabled": true,
+    "oldThreshold": 4,
+    "oldNote": "二转",
+    "anchorLabel": "0807",
+    "anchorStart": "2026-07-29",
+    "currentOverride": ""
+  },
+  "dingtalkWebhook": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN",
+  "talkScripts": {
+    "未收到通知": "哈喽伙伴，辛苦您再次联系下这个用户，他进线店铺需要服务但现在没人服务",
+    "更换通知方式": "哈喽伙伴，这个用户更换新联系方式：{新联系方式}，请您之后添加并联系用户新的联系方式",
+    "更换联系方式": "哈喽伙伴，这个用户更换新联系方式：{新联系方式}，请您之后添加并联系用户新的联系方式",
+    "承诺资料未给": "哈喽伙伴，用户反馈资料没给，辛苦您处理一下",
+    "用户添加不成功": "哈喽伙伴，辛苦您主动添加下这个用户，他加不上您",
+    "用户主动添加不成功": "哈喽伙伴，辛苦您主动添加下这个用户，他加不上您",
+    "正价报课需求": "哈喽伙伴，这个用户反馈现在有正价报课的需求，辛苦您及时回复下他",
+    "二转": ""
+  }
+}

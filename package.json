@@ -1,0 +1,13 @@
+﻿{
+  "name": "kehu-auto",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "客诉自动化处理系统（本地运行）",
+  "engines": { "node": ">=22.5.0" },
+  "dependencies": {
+    "playwright": "^1.62.0",
+    "jszip": "^3.10.1",
+    "sax": "^1.6.1"
+  }
+}
