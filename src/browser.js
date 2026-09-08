@@ -24,10 +24,12 @@ function cleanProfileLock() {
 }
 
 export async function launch() {
-  const headless = process.env.KEHU_HEADLESS === "1";
+  const headless = process.env.KEHU_HEADLESS !== "0";   // 默认无头（复用 profile 登录态，不弹窗）；KEHU_HEADLESS=0 回退有头
   cleanProfileLock();
   await new Promise(r => setTimeout(r, 1000));
-  const ctx = await chromium.launchPersistentContext(config.profileDir, { channel: "msedge", headless, viewport: null });
+  const launchOpts = { channel: "msedge", headless };
+  if (!headless) launchOpts.viewport = null;
+  const ctx = await chromium.launchPersistentContext(config.profileDir, launchOpts);
   const state = (() => { try { return JSON.parse(fs.readFileSync(sessionFile, "utf8")); } catch { return {}; } })();
   if (state.cookies?.length) await ctx.addCookies(state.cookies);
   const page = await ctx.newPage();

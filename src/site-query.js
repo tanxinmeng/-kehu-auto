@@ -46,7 +46,25 @@ async function searchOnPage(page, orderNo) {
   await page.waitForTimeout(400);
   const btn = page.getByRole("button", { name: "搜索", exact: true });
   await btn.click();
-  await page.waitForTimeout(3500);
+  // 固定 3.5s 在站点卡顿时会读到未渲染完的空表 → 误判"查不到"（错误写"系统未掉落"）。
+  // 改为：等网络空闲后读表，命中目标订单立即返回；连续两轮读表结果一致才认定"确实没有"。
+  const want = String(orderNo);
+  let prev = "", emptyStreak = 0;
+  for (let i = 0; i < 8; i++) {
+    await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
+    // networkidle 可能在搜索请求发出前就空闲，读表前固定等一下让站点渲染
+    await page.waitForTimeout(1200);
+    const res = await readResultTable(page);
+    if (res.ok && res.rows.some(r => r.includes(want))) return res;
+    // 站点点击搜索后会先闪"暂无数据"再渲染真实结果，所以必须连续两轮都是空态才算查不到
+    const emptyTip = await page.evaluate(() => (document.body.innerText || "").includes("暂无数据")).catch(() => false);
+    emptyStreak = emptyTip ? emptyStreak + 1 : 0;
+    if (emptyStreak >= 2) return res;
+    const sig = JSON.stringify(res.rows || []);
+    if (sig && sig === prev && i >= 3) return res;
+    prev = sig;
+    await page.waitForTimeout(800);
+  }
   return await readResultTable(page);
 }
 
@@ -74,6 +92,27 @@ async function ensureSite(page, siteKey) {
   throw new Error("PAGE_TIMEOUT:" + finalUrl + " (页面未出现订单号搜索框，可能是网络慢或站点异常)");
 }
 
+// 页面会话内直接调列表接口（鉴权走 cookie），无渲染竞态。
+// 根因：页面 UI 点击搜索后会先闪"暂无数据"再渲染结果，时序不稳，曾三次把能查到的单误判成"系统未掉落"。
+function apiPath(siteKey) {
+  return siteKey === "aiDuola" ? "/prod-api/flowtracker-yy-ai/clue/info/list" : "/prod-api/flowtracker-yy/clue/info/list";
+}
+
+async function queryOrderApi(page, siteKey, orderNo) {
+  return await page.evaluate(async ({ p, orderNo }) => {
+    try {
+      const resp = await fetch(p, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nickName: "", nickNames: [], mobile: "", mobiles: [], orderNo: String(orderNo), virtualMobile: "", orderNos: [String(orderNo)], virtualMobiles: [], current: 1, size: 10, recordId: "", recordIds: [] })
+      });
+      const j = await resp.json();
+      if (j.code !== "000000") return { ok: false, msg: j.mesg || resp.status };
+      return { ok: true, rows: j.data || [] };
+    } catch (e) { return { ok: false, msg: String(e).slice(0, 120) }; }
+  }, { p: apiPath(siteKey), orderNo });
+}
+
 async function queryOrder(page, siteKey, orderNo) {
   try {
     await ensureSite(page, siteKey);
@@ -85,14 +124,26 @@ async function queryOrder(page, siteKey, orderNo) {
   }
   const url0 = await page.url();
   if (url0.includes("login.dingtalk.com")) return { loginRequired: true };
+  // 首选直接调接口
+  const api = await queryOrderApi(page, siteKey, orderNo);
+  if (api.ok) {
+    for (const row of api.rows) {
+      if (String(row.orderNo) === String(orderNo)) {
+        return { found: true, rec: { period: row.serverTerm || "", phone: row.mobile || "", tutor: row.clueTeacherUserName || "", remark: row.remark || "" } };
+      }
+    }
+    return { found: false };
+  }
+  // 接口异常（鉴权/接口变更/站点抖动）→ 回退页面搜索
+  log(`[${orderNo}] @${siteKey} 接口查询异常(${api.msg})，回退页面搜索`);
   const res = await searchOnPage(page, orderNo);
-  if (!res.ok) return { found: false, loginRequired: res.url && res.url.includes("login.dingtalk.com") };
+  if (!res.ok) return { found: false, loginRequired: res.url && res.url.includes("login.dingtalk.com"), apiError: true };
   for (const row of res.rows) {
     const rec = {};
     COL.forEach((k, i) => rec[k] = row[i] !== undefined ? row[i] : "");
     if (rec.order === String(orderNo)) return { found: true, rec };
   }
-  return { found: false };
+  return { found: false, apiError: true };
 }
 
 // 规则：期次/手机号/顾问
@@ -127,22 +178,31 @@ function arg(name) { const i = args.indexOf("--" + name); return i >= 0 ? args[i
 const limit = Number(arg("limit") || 30);
 const rowsFilter = arg("rows");       // "10858-10869"
 const sheetFilter = arg("sheet");     // AI / 高
+const idsFilter = arg("ids");         // "1,2,3" 指定 id 强制补全（绕过 query_status 过滤）
 
 if (!fs.existsSync(sessionFile)) { log("未找到会话快照，请先运行 start-login.bat"); process.exit(1); }
 
 const db = openDb(dataDir);
 const REQUERY_HOURS = 2;
-let where = "(query_status = 'pending' OR (query_status = 'query_fail' AND query_updated_at < ?) OR (query_status = 'not_found' AND (query_updated_at IS NULL OR query_updated_at < ?)))";
-const requeryThreshold = Date.now() - REQUERY_HOURS * 3600 * 1000;
-const params0 = [requeryThreshold, requeryThreshold];
-const params = params0;
-if (rowsFilter) {
-  const [a, b] = rowsFilter.split("-").map(Number);
-  where += " AND src_row BETWEEN ? AND ?"; params.push(a, b || a);
+let where, params;
+if (idsFilter) {
+  const ids = idsFilter.split(",").map(Number).filter(n => n > 0);
+  if (!ids.length) { log("无效的 ids 参数"); process.exit(0); }
+  where = "id IN (" + ids.map(() => "?").join(",") + ")";
+  params = [...ids];
+} else {
+  where = "(query_status = 'pending' OR (query_status = 'query_fail' AND query_updated_at < ?) OR (query_status = 'query_fail' AND query_remark LIKE '%站点波动%' AND query_updated_at < ?) OR (query_status = 'not_found' AND (query_updated_at IS NULL OR query_updated_at < ?)))";
+  const requeryThreshold = Date.now() - REQUERY_HOURS * 3600 * 1000;
+  const requeryFast = Date.now() - 10 * 60 * 1000;   // 站点波动导致的失败 10 分钟后即可重查（波动一般 1~2 分钟）
+  params = [requeryThreshold, requeryFast, requeryThreshold];
+  if (rowsFilter) {
+    const [a, b] = rowsFilter.split("-").map(Number);
+    where += " AND src_row BETWEEN ? AND ?"; params.push(a, b || a);
+  }
+  if (sheetFilter) { where += " AND sheet = ?"; params.push(sheetFilter); }
 }
-if (sheetFilter) { where += " AND sheet = ?"; params.push(sheetFilter); }
-const orders = db.prepare(`SELECT * FROM complaints WHERE ${where} ORDER BY id LIMIT ?`).all(...params, limit);
-log(`待处理 ${orders.length} 条（limit=${limit}）`);
+const orders = db.prepare(`SELECT * FROM complaints WHERE ${where} ORDER BY id${idsFilter ? "" : " LIMIT ?"}`).all(...(idsFilter ? params : [...params, limit]));
+log(`待处理 ${orders.length} 条${idsFilter ? "（ids 指定）" : "（limit=" + limit + "）"}`);
 
 cleanProfileLock();
 await new Promise(r => setTimeout(r, 1000));
@@ -150,6 +210,16 @@ const ctx = await chromium.launchPersistentContext(config.profileDir, { channel:
 const state = JSON.parse(fs.readFileSync(sessionFile, "utf8"));
 if (state.cookies?.length) await ctx.addCookies(state.cookies);
 const page = await ctx.newPage();
+if (process.env.QRY_DEBUG) {
+  const dbg = [];
+  page.on('request', req => { if (req.url().includes('clue/info/list')) dbg.push(new Date().toISOString().slice(11, 23) + ' REQ ' + (req.postData() || '').slice(0, 220)); });
+  page.on('response', async resp => {
+    if (resp.url().includes('clue/info/list')) {
+      try { const t = await resp.text(); dbg.push(new Date().toISOString().slice(11, 23) + ' RESP len=' + t.length + ' ' + t.slice(0, 180).replace(/\s+/g, ' ')); } catch {}
+    }
+  });
+  setInterval(() => { if (dbg.length) { try { fs.appendFileSync(path.join(dataDir, "query_net.log"), dbg.splice(0).join("\n") + "\n"); } catch {} } }, 2000);
+}
 
 let currentSite = null;
 let ok = 0, notFound = 0, loginFail = 0, netFail = 0, skipNoOrder = 0;
@@ -166,6 +236,26 @@ let ok = 0, notFound = 0, loginFail = 0, netFail = 0, skipNoOrder = 0;
 	  return [primary, ...others];
 	}
 
+	// 对照单（金丝雀）：站点会间歇性抖动（接口返回 HTML 错误页或批量空结果，持续 1~2 分钟），
+	// 此时"查不到"不可信。判 not_found 前先查一条刚成功过的订单，对照也查不到 → query_fail 稍后重查。
+	let canary = null;
+	function pickCanary(excludeOrderNo) {
+	  const row = db.prepare("SELECT order_no, query_site FROM complaints WHERE query_status IN ('filled','special') AND order_no IS NOT NULL AND order_no != '' AND order_no != ? ORDER BY query_updated_at DESC LIMIT 1").get(String(excludeOrderNo || ""));
+	  if (!row) return null;
+	  const site = row.query_site && row.query_site !== "multi" && allSites.includes(row.query_site) ? row.query_site : (siteBySheet["高"] || allSites[0]);
+	  return { orderNo: row.order_no, site, checkedAt: 0, ok: false };
+	}
+	async function canaryHealthy() {
+	  if (!canary) canary = pickCanary(null);
+	  if (!canary) return true;  // 库里没有已查到的单可对照（如首次运行），只能信任查询结果
+	  if (Date.now() - canary.checkedAt < 30000) return canary.ok;
+	  const c = await queryOrder(page, canary.site, canary.orderNo);
+	  canary.checkedAt = Date.now();
+	  canary.ok = !!c.found;
+	  if (!canary.ok) log(`对照单 ${canary.orderNo} @${canary.site} 也查不到 → 站点处于异常波动期`);
+	  return canary.ok;
+	}
+
 	for (const o of orders) {
 	  if (!o.order_no) { skipNoOrder++; updNoOrder.run(Date.now(), o.id); log(`[${o.id}] 无订单号，跳过查询 → 标记为 no_order`); continue; }
 	  const sites = orderedSites(o.sheet);
@@ -175,7 +265,7 @@ let ok = 0, notFound = 0, loginFail = 0, netFail = 0, skipNoOrder = 0;
 	    const r = await queryOrder(page, site, o.order_no);
 	    if (r.loginRequired) { log(`[${o.id}] ${o.sheet}行${o.src_row} 订单${o.order_no} @${site} 登录失效`); loginFail++; break; }
 	    if (r.pageTimeout) { log(`[${o.id}] ${o.sheet}行${o.src_row} 订单${o.order_no} @${site} 超时，尝试下一站...`); netFail++; thisNetFail++; continue; }
-	    if (r.found) { foundRec = r.rec; foundSite = site; break; }
+	    if (r.found) { foundRec = r.rec; foundSite = site; canary = { orderNo: o.order_no, site: foundSite, checkedAt: Date.now(), ok: true }; break; }
 	    // 该站没查到，尝试下一个站点
 	  }
 	  if (loginFail) break;  // 登录失效才终止全部
@@ -189,10 +279,17 @@ let ok = 0, notFound = 0, loginFail = 0, netFail = 0, skipNoOrder = 0;
 	    updFail.run("所有站点网络超时或不可用", Date.now(), o.id);
 	    log(`[${o.id}] ${o.sheet}行${o.src_row} 订单${o.order_no} 全部站点不可用 → query_fail (稍后重试)`);
 	  } else {
-	    // 站点可用但都查不到该订单
-	    upd.run(config.rules.notFoundPeriod, "", "", "not_found", "multi", "", Date.now(), o.id);
-	    notFound++;
-	    log(`[${o.id}] ${o.sheet}行${o.src_row} 订单${o.order_no} 多站查不到 → 系统未掉落`);
+	    // 都查不到：先对照校验，站点异常时绝不写"系统未掉落"
+	    // 接口报错本身不能证明是站点波动（可能是该订单号触发的个别错误）——以对照单结果为准
+	    const healthy = await canaryHealthy();
+	    if (!healthy) {
+	      updFail.run("站点波动/接口异常(对照校验未通过)，稍后自动重查", Date.now(), o.id);
+	      log(`[${o.id}] ${o.sheet}行${o.src_row} 订单${o.order_no} 站点异常 → query_fail (不写系统未掉落，稍后重查)`);
+	    } else {
+	      upd.run(config.rules.notFoundPeriod, "", "", "not_found", "multi", "", Date.now(), o.id);
+	      notFound++;
+	      log(`[${o.id}] ${o.sheet}行${o.src_row} 订单${o.order_no} 多站查不到 → 系统未掉落`);
+	    }
 	  }
 	  await page.waitForTimeout(600);
 	}

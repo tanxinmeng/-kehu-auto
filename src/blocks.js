@@ -33,27 +33,44 @@ export function isResidueRow(parts) {
   // B 列为空且 C 列无 10 位以上订单号 → 残留行
   const B = (parts[1] || "").trim();
   const C = (parts[2] || "").trim();
-  if (B === "" && !/\d{10,}/.test(C)) return true;
+  if (B === "" && !/\d{14,}/.test(C)) return true;
   return false;
 }
 
 // 判断一行是否为"块起始"（新记录的第一行）
-export function isBlockStart(parts) {
-  // 少于 3 列的行是 C 列续行（下单时间/课程等，如 "8.1"、"7.18"），不是新行
-  if (parts.length < 3) return false;
-  const A = (parts[0] || "").trim();
-  const B = (parts[1] || "").trim();
-  const C = (parts[2] || "").trim();
-  if (dateRe.test(normDate(A)) && (B !== "" || C !== "")) return true; // A=反馈时间 + 有客服/订单
-  if (/^客服/.test(B) && C !== "") return true;      // B=客服编号 + 订单号
-  if (A === "" && B === "" && C !== "") return true; // A/B 缺失但有订单号
+// rawLen = 原始行（未 shift 前导空列）的列数。块起始行原始必含 A/B/C 三列（即使为空也有 \t 分隔）；
+// C 单元格首行若是空行，订单号会被挤到下一行单独成列（rawLen=1），那不是新块起始。
+export function isBlockStart(parts, rawLen = parts.length) {
+  // parts 已 shift 掉前导空列。块起始行（原始 [A反馈时间, B客服, C订单号]）在 shift 后可能为
+  // [A,B,C] / [B,C](A空) / [C](A,B空)，订单号始终在末列。续行（下单时间/课程）仅 1 列无订单号；
+  // 结束行末列是顾问/复核（文本）无订单号。
+  const last = (parts[parts.length - 1] || "").trim();
+  // 订单号 19 位、手机号 11 位 → 14 位阈值区分，避免把结束行 F 列手机号（C 空时被 shift 到末列）误判为块起始
+  if (rawLen >= 3 && /\d{14,}/.test(last)) return true;
+
+  // 兜底：C 列无订单号但 A 列是日期、B 列有客服（缺订单号的信息不全行，仍需占位入库避免串行）
+  if (parts.length >= 3) {
+    const A = (parts[0] || "").trim();
+    const B = (parts[1] || "").trim();
+    if (dateRe.test(normDate(A)) && B !== "") return true;
+  }
   return false;
 }
 
 // 从 C 列首行提取订单号（去掉 +、视频号 等后缀）
 export function extractOrder(c) {
-  const m = String(c || "").match(/\d{10,}/);
+  const m = String(c || "").match(/\d{14,}/);
   return m ? m[0] : "";
+}
+
+// 块起始行原始为 [A反馈时间, B客服编号, C订单号]，shift 掉前导空列后可能为
+// [A,B,C] / [B,C](A空) / [C](A,B空)。按"末列=C"还原三列，避免 A/B 为空时字段错位。
+function abcFromParts(parts) {
+  const n = parts.length;
+  const C = (parts[n - 1] || "").trim();
+  const B = n >= 2 ? (parts[n - 2] || "").trim() : "";
+  const A = n >= 3 ? (parts[n - 3] || "").trim() : "";
+  return { A, B, C };
 }
 
 // 解析整份复制文本 → 记录数组（按源表从上到下顺序，每块含 offset 行号）
@@ -73,18 +90,20 @@ export function parseCopy(text) {
   for (; i < lines.length; i++) {
     const line = lines[i];
     const parts = line.split("\t");
+    const rawLen = parts.length;
     // 兼容两种复制格式：腾讯文档可能保留或裁剪前导空列（A/B），统一去掉前导空字段再判断
     while (parts.length > 1 && (parts[0] || "").trim() === "") parts.shift();
     if (isTabOnlyLine(line)) { row++; continue; }       // 空行：占源表一行，不产生记录
     if (isResidueRow(parts)) { row++; continue; }        // 日期残留行：占一行，不产生记录、不入客户信息
-    if (isBlockStart(parts)) {
+    if (isBlockStart(parts, rawLen)) {
       if (cur) records.push(cur);
+      const abc = abcFromParts(parts);
       cur = {
         offset: row,
-        feedback_date: normDate(parts[0]),
-        cust_no: (parts[1] || "").trim(),
-        order_no: extractOrder(parts[2]),
-        startC: parts[2] || "",
+        feedback_date: normDate(abc.A),
+        cust_no: abc.B,
+        order_no: extractOrder(abc.C),
+        startC: abc.C,
         contC: [],
         endParts: null,
       };
@@ -92,18 +111,20 @@ export function parseCopy(text) {
       // 消费续行/结束行/碎片（不占行号），直到下一个块起始
       i++;
       while (i < lines.length) {
-        const p2 = lines[i].split("\t");
+        const rawParts = lines[i].split("\t");
+        const rawLen2 = rawParts.length;
+        const p2 = rawParts.slice();
         while (p2.length > 1 && (p2[0] || "").trim() === "") p2.shift();
         if (isTabOnlyLine(lines[i])) { i++; continue; }          // 块内空行：不结束块，继续
         if (isResidueRow(p2)) { i++; continue; }                 // 块内日期残留：忽略，继续
-        if (isBlockStart(p2)) { i--; break; }                    // 下一个块起始
-                cur.contC.push((p2[0] || "").trim());
+        if (isBlockStart(p2, rawLen2)) { i--; break; }           // 下一个块起始
+        cur.contC.push((rawParts[0] || "").trim());
         // ?????? C(??)+D(??) ???????/???/??????????????
         // 结束行识别：C 列有内容且该行至少 2 列。不再要求第 2 列（问题归类 D）非空——
         // D 可能为空但期次/手机号/顾问已有值；C 列续行（下单时间/课程）都只有 1 列，
         // 日期续行由 dateRe 排除，避免把"下单时间"误当结束行
         if (!cur.endParts && p2.length >= 2 && !dateRe.test(normDate(p2[0] || ""))) {
-          cur.endParts = p2;                                     // 结束行已见：记录完整
+          cur.endParts = rawParts;                               // 存原始列，D/E 位置不因 C 空而错位
         }
         i++;
       }
@@ -136,18 +157,20 @@ export function parseCopyWithBlanks(text) {
   for (; i < lines.length; i++) {
     const line = lines[i];
     const parts = line.split("\t");
+    const rawLen = parts.length;
     // 兼容两种复制格式：去掉前导空列（A/B）再判断
     while (parts.length > 1 && (parts[0] || "").trim() === "") parts.shift();
     if (isTabOnlyLine(line)) { rows.push({ kind: "blank", offset: row }); row++; continue; }
     if (isResidueRow(parts)) { rows.push({ kind: "residue", offset: row, feedback_date: normDate(parts[0]) }); row++; continue; }
-    if (isBlockStart(parts)) {
+    if (isBlockStart(parts, rawLen)) {
       if (cur && !pushed) rows.push({ kind: "record", rec: cur });
+      const abc = abcFromParts(parts);
       cur = {
         offset: row,
-        feedback_date: normDate(parts[0]),
-        cust_no: (parts[1] || "").trim(),
-        order_no: extractOrder(parts[2]),
-        startC: parts[2] || "",
+        feedback_date: normDate(abc.A),
+        cust_no: abc.B,
+        order_no: extractOrder(abc.C),
+        startC: abc.C,
         contC: [],
         endParts: null,
       };
@@ -155,7 +178,9 @@ export function parseCopyWithBlanks(text) {
       row++;
       i++;
       while (i < lines.length) {
-        const p2 = lines[i].split("\t");
+        const rawParts = lines[i].split("\t");
+        const rawLen2 = rawParts.length;
+        const p2 = rawParts.slice();
         while (p2.length > 1 && (p2[0] || "").trim() === "") p2.shift();
         // 结束行(endParts)之后：空行/日期残留 = 源表单独占一行的空白/残留行（不再吞掉，避免串行）
         if (isTabOnlyLine(lines[i])) {
@@ -172,11 +197,11 @@ export function parseCopyWithBlanks(text) {
           }
           i++; continue;
         }
-        if (isBlockStart(p2)) { i--; break; }                    // 下一个块起始
-        cur.contC.push((p2[0] || "").trim());
+        if (isBlockStart(p2, rawLen2)) { i--; break; }           // 下一个块起始
+        cur.contC.push((rawParts[0] || "").trim());
         // 结束行识别：同 parseCopy（≥2 列且首列非日期；不要求问题归类 D 非空）
         if (!cur.endParts && p2.length >= 2 && !dateRe.test(normDate(p2[0] || ""))) {
-          cur.endParts = p2;                                     // 结束行已见 → 记录完整，立即推入
+          cur.endParts = rawParts;                               // 存原始列，D/E 位置不因 C 空而错位
           rows.push({ kind: "record", rec: cur });
           pushed = true;
         }
@@ -197,7 +222,7 @@ export function extractFields(rec, sheet) {
     offset: rec.offset,
     feedback_date: rec.feedback_date,
     cust_no: rec.cust_no,
-    order_no: rec.order_no,
+    order_no: rec.order_no || extractOrder(cText),
     customer_info: cText,
     category: (ep[1] || "").trim(),          // D
     src_period: (ep[2] || "").trim(),        // E

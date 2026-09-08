@@ -87,6 +87,17 @@ export function openDb(dataDir) {
   if (!cols.some(c => c.name === "ding_msg")) {
     db.exec("ALTER TABLE complaints ADD COLUMN ding_msg TEXT");
   }
+  // 渠道库
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS channel_lib (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      prod_name TEXT NOT NULL,
+      prod_id TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      UNIQUE(prod_id, channel)
+    )
+  `);
   return db;
 }
 

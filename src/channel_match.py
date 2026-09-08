@@ -26,11 +26,14 @@ def main():
 
     # Read input
     df = pd.read_excel(file_path)
-    # Find 商品名称 and 商品ID columns
+    # Find 订单编号 / 商品名称 / 商品ID columns
+    order_col = None
     name_col = None
     id_col = None
     for c in df.columns:
         cs = str(c).strip()
+        if ('订单编号' in cs or '订单号' in cs or '订单ID' in cs) and order_col is None:
+            order_col = c
         if '商品名称' in cs and name_col is None:
             name_col = c
         if '商品ID' in cs and id_col is None:
@@ -41,13 +44,15 @@ def main():
         print(json.dumps({"ok": False, "error": f"找不到商品名称/商品ID列。列名: {fn}"}, ensure_ascii=False))
         return
 
-    # Convert ID column to string to preserve full precision (19-digit IDs)
+    # Convert key columns to string to preserve full precision (19-digit IDs / order numbers)
     def to_str(x):
         if pd.isna(x):
             return ''
         if isinstance(x, float):
             return str(int(x))
-        return str(x)
+        return str(x).strip()
+    if order_col is not None:
+        df[order_col] = df[order_col].apply(to_str)
     df[id_col] = df[id_col].apply(to_str)
 
     # Match
@@ -69,15 +74,20 @@ def main():
     id_idx = df.columns.get_loc(id_col)
     df.insert(id_idx + 1, "渠道", channels)
 
-    # Save output with text format for ID column
+    # Save output with text format for order/id columns
     base, ext = os.path.splitext(file_path)
     out_path = base + "_渠道" + ext
     with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
         ws = writer.sheets['Sheet1']
-        id_letter = get_column_letter(id_idx + 1)
-        for r in range(2, ws.max_row + 1):
-            ws[f'{id_letter}{r}'].number_format = '@'
+        text_cols = []
+        if order_col is not None:
+            text_cols.append(df.columns.get_loc(order_col) + 1)
+        text_cols.append(id_idx + 1)
+        for col_idx in set(text_cols):
+            letter = get_column_letter(col_idx)
+            for r in range(2, ws.max_row + 1):
+                ws[f'{letter}{r}'].number_format = '@'
 
     print(json.dumps({
         "ok": True,

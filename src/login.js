@@ -22,21 +22,34 @@ async function saveSession(ctx) {
   } catch (e) { log("保存会话失败: " + e.message); }
 }
 
+function cleanProfileLock() {
+  const profileDir = path.resolve(ROOT, config.profileDir);
+  const lockFiles = ["SingletonLock", "SingletonSocket", "SingletonCookie", "Lockfile"];
+  for (const f of lockFiles) {
+    try { fs.unlinkSync(path.join(profileDir, f)); } catch {}
+  }
+}
+
 log("开始启动 Edge（档案: " + config.profileDir + "）...");
+cleanProfileLock();
+await new Promise(r => setTimeout(r, 1000));
 let ctx;
 try {
   ctx = await chromium.launchPersistentContext(config.profileDir, {
     channel: "msedge", headless: false, viewport: null,
     args: ["--start-maximized", "--window-position=0,0"],
   });
-  log("Edge 已启动，正在打开 3 个标签页...");
+  log("Edge 已启动，正在打开标签页...");
 } catch (e) {
   log("Edge 启动失败: " + (e.message || e).split("\n")[0]);
   console.error(e);
   process.exit(1);
 }
 
-const entries = Object.entries(config.sites);
+// 支持 --site <key>：只登录指定站点（如 --site tencentDoc），缺省登录全部站点
+const siteArgIdx = process.argv.indexOf("--site");
+const onlySite = siteArgIdx >= 0 ? process.argv[siteArgIdx + 1] : "";
+const entries = Object.entries(config.sites).filter(([key]) => !onlySite || key === onlySite);
 let first = true;
 for (const [key, site] of entries) {
   let page;
@@ -63,7 +76,7 @@ for (const [key, site] of entries) {
   await new Promise(r => setTimeout(r, 1500));
 }
 
-log("请在 Edge 窗口登录 3 个标签页；登录完成后【关闭窗口】即可（期间每5秒自动保存会话）。");
+log("请在 Edge 窗口登录 " + entries.length + " 个标签页；登录完成后【关闭窗口】即可（期间每5秒自动保存会话）。");
 const timer = setInterval(() => saveSession(ctx), 5000);
 try {
   await new Promise((resolve) => { ctx.browser().on("disconnected", resolve); });

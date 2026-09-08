@@ -2,503 +2,91 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>客诉内部处理表</title>
 <style>
-  :root {
-    --primary: #2b579a;
-    --primary-hover: #1f3f6e;
-    --primary-light: #eef4ff;
-    --ai: #2b579a;
-    --gao: #c55a11;
-    --success: #1f6e43;
-    --warning: #e67e22;
-    --error: #c0392b;
-    --text-primary: #262626;
-    --text-secondary: #595959;
-    --text-tertiary: #8c8c8c;
-    --border: #e5e6eb;
-    --border-light: #f2f3f5;
-    --bg-page: #f5f6fa;
-    --bg-card: #ffffff;
-    --shadow-sm: 0 1px 2px rgba(0,0,0,0.03);
-    --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
-    --shadow-lg: 0 4px 16px rgba(0,0,0,0.08);
-    --radius-sm: 4px;
-    --radius-md: 6px;
-    --radius-lg: 8px;
-  }
+  :root { --ai:#2b579a; --gao:#c55a11; }
   * { box-sizing:border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
-    margin: 0;
-    background: var(--bg-page);
-    color: var(--text-primary);
-    font-size: 13px;
-    line-height: 1.5;
-  }
-  .top {
-    background: linear-gradient(90deg, #2b579a, #1f3f6e);
-    color: #fff;
-    padding: 10px 16px;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    flex-wrap: wrap;
-    box-shadow: var(--shadow-md);
-  }
-  .top h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.2px; }
-  .stats { font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
-  .stats b { color: #ffd666; font-weight: 600; }
+  body { font-family:"Microsoft YaHei",sans-serif; margin:0; background:#f5f6fa; color:#333; font-size:12px; }
+  .top { background:linear-gradient(90deg,#2b579a,#1f3f6e); color:#fff; padding:10px 14px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  .top h1 { font-size:17px; margin:0; }
+  .stats { font-size:12px; display:flex; gap:10px; flex-wrap:wrap; }
+  .stats b { color:#ffd966; }
+  .syncbar { padding:8px 14px; background:#eef2fa; border-bottom:1px solid #d5dceb; display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:12px; }
+  .syncbar .grp { display:flex; align-items:center; gap:5px; background:#fff; padding:4px 8px; border:1px solid #ccd4e6; border-radius:5px; }
+  .syncbar input[type=number] { width:76px; padding:4px 5px; border:1px solid #bbb; border-radius:4px; }
+  .syncbar button { padding:5px 12px; background:#2b579a; color:#fff; border:0; border-radius:4px; cursor:pointer; }
+  .syncbar button.alt { background:#fff; color:#2b579a; border:1px solid #2b579a; }
+  .dingbar { padding:6px 14px; background:#e8f5e9; border-bottom:1px solid #c8e6c9; display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:12px; }
+  .dingbar .dgrp { display:flex; align-items:center; gap:5px; }
+  .dingbar button { padding:4px 10px; border:1px solid #2b579a; border-radius:4px; cursor:pointer; font-size:11px; background:#fff; color:#2b579a; }
+  .dingbar button.ding-out { border-color:#e67e22; color:#e67e22; }
+  .dingbar button.ding-switch { border-color:#7f8c8d; color:#7f8c8d; }
+  .dingbar label { font-size:11px; cursor:pointer; }
+  .syncmsg { padding:4px 14px; font-size:12px; color:#1a6d1a; }
+  .filters { padding:8px 14px; background:#fff; border-bottom:1px solid #e3e6ea; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .filters select,.filters input { padding:5px 7px; border:1px solid #ccc; border-radius:4px; font-size:12px; }
+  .filters button { padding:5px 12px; background:#2b579a; color:#fff; border:0; border-radius:4px; cursor:pointer; font-size:12px; }
+  .filters button.alt { background:#fff; color:#2b579a; border:1px solid #2b579a; }
+  .pager { padding:6px 14px; font-size:12px; color:#888; }
+  .pager button { margin-left:6px; }
+  .wrap { padding:8px 14px; }
+  table { width:100%; border-collapse:collapse; background:#fff; font-size:11.5px; table-layout:fixed; }
+  th,td { border:1px solid #e3e6ea; padding:5px 4px; text-align:left; vertical-align:middle; overflow:hidden; }
+  th { background:#eef1f7; position:sticky; top:0; z-index:2; white-space:nowrap; font-size:11.5px; }
+  td.info { white-space:pre-line; line-height:1.4; font-size:11px; word-break:break-all; }
+  td.cat { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  tr.special td { background:#fff7e6; }
+  tr.not_found td { background:#fff6d8; }
+  tr.not_found td.period { background:#fde9b3; font-weight:700; color:#8a6d00; }
+  tr.filled td { background:#f2fbf2; }
+  tr.srcfilled td { background:#e9f7ef; }
+  .badge { display:inline-block; padding:1px 7px; border-radius:3px; color:#fff; font-size:11px; }
+  .badge.ai { background:var(--ai); } .badge.gao { background:var(--gao); }
+  .badge.src { background:#2e8b57; }
+  .procbtn { padding:3px 10px; border:1px solid #bbb; border-radius:3px; font-size:12px; cursor:pointer; background:#fff; }
+  .procbtn.yes { background:#2b579a; color:#fff; border-color:#2b579a; }
+  .reqbtn { padding:3px 8px; border:1px solid #2b579a; border-radius:3px; font-size:11px; cursor:pointer; background:#fff; color:#2b579a; white-space:nowrap; }
+  .reqbtn:hover { background:#2b579a; color:#fff; }
+  .reqbtn:disabled { background:#eee; border-color:#ccc; color:#bbb; cursor:not-allowed; }
+  .order { font-family:Consolas,monospace; font-size:10.5px; word-break:break-all; }
+  .fb { width:100%; min-height:22px; border:1px solid transparent; border-radius:3px; font-size:11px; resize:none; background:transparent; font-family:inherit; }
+  .fb:focus { border-color:#2b579a; background:#fff; outline:none; }
+  .rmk { width:100%; padding:2px 3px; border:1px solid #ccc; border-radius:3px; font-size:11px; }
+  .copyable { cursor:pointer; }
+  .copyable:hover { background:#eef4ff; }
+  .talkcell { cursor:pointer; }
+  .talkcell:hover { background:#eef4ff; }
+  .tk { white-space:pre-line; line-height:1.45; font-size:11px; word-break:break-all; }
+  .tk .t-talk { color:#1a6d1a; }
+  .talk-wrap { display:flex; align-items:flex-start; gap:5px; }
+  .tkwrap { flex:1 1 auto; }
+  .genbtn { flex:0 0 auto; padding:2px 7px; border:1px solid #bbb; border-radius:3px; background:#eee; color:#888; font-size:11px; cursor:pointer; white-space:nowrap; }
+  .genbtn.on { background:#2e8b57; color:#fff; border-color:#2e8b57; }
+	  .dingcell { font-size:11px; line-height:1.5; text-align:center; }
+	  .dbtn { padding:3px 10px; border:1px solid #1677ff; border-radius:3px; background:#1677ff; color:#fff; font-size:11px; cursor:pointer; white-space:nowrap; }
+	  .dbtn:hover { background:#0d62eb; }
+	  .dbtn:disabled { background:#bbb; border-color:#bbb; color:#fff; cursor:not-allowed; }
+	  .talkcell .dingbtn { display:none; }
+	  .dingbtn { padding:2px 7px; border:1px solid #1677ff; border-radius:3px; background:#1677ff; color:#fff; font-size:10.5px; cursor:pointer; white-space:nowrap; }
+	  .dingbtn:hover { background:#0d62eb; }
+	  .dingbtn.sent { background:#bbb; border-color:#bbb; color:#fff; }
+	  .delbtn { padding:0 5px; border:1px solid #e0e0e0; border-radius:3px; background:#fff; color:#c0392b; font-size:14px; font-weight:700; cursor:pointer; line-height:1.4; }
+	  .delbtn:hover { background:#c0392b; color:#fff; border-color:#c0392b; }
+	  .selbox { width:15px; height:15px; cursor:pointer; accent-color:#2b579a; }
+	  .selbar { display:none; padding:6px 14px; background:#eef4ff; border-bottom:1px solid #c5d5f2; align-items:center; gap:8px; font-size:12px; }
+	  .selbar.show { display:flex; }
+	  .selbar button { padding:4px 10px; border:1px solid #2b579a; border-radius:4px; cursor:pointer; font-size:12px; background:#fff; color:#2b579a; }
+	  .selbar button.primary { background:#2b579a; color:#fff; }
+	  .selbar button.danger { border-color:#c0392b; color:#c0392b; }
+	  .selbar .selcnt { font-weight:700; color:#2b579a; }
+  .genbtn-all { padding:1px 6px; border:1px solid #bbb; border-radius:3px; background:#eee; color:#888; font-size:10.5px; cursor:pointer; margin-left:4px; vertical-align:middle; }
+  .genbtn-all.on { background:#2e8b57; color:#fff; border-color:#2e8b57; }
 
-  .syncbar {
-    padding: 8px 16px;
-    background: var(--bg-card);
-    border-bottom: 1px solid var(--border-light);
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    align-items: center;
-    font-size: 11px;
-  }
-  .syncbar .grp {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--bg-page);
-    padding: 5px 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-  }
-  .syncbar input[type=number] {
-    width: 78px;
-    padding: 5px 7px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-  }
-  .syncbar input[type=number]:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 2px rgba(22,119,255,0.1);
-  }
-  .syncbar button {
-    padding: 5px 12px;
-    background: var(--primary);
-    color: #fff;
-    border: 0;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 11px;
-    transition: all 0.2s;
-  }
-  .syncbar button:hover { background: var(--primary-hover); }
-  .syncbar button.alt {
-    background: var(--bg-card);
-    color: var(--primary);
-    border: 1px solid var(--primary);
-  }
-  .syncbar button.alt:hover {
-    background: var(--primary-light);
-  }
+  .footer { padding:6px 14px; color:#888; font-size:11.5px; }
+  col.c-info { width:26%; } col.c-cat { width:8%; } col.c-fb { width:14%; }
 
-  .dingbar {
-    padding: 7px 16px;
-    background: #f6ffed;
-    border-bottom: 1px solid #d9f7be;
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    align-items: center;
-    font-size: 13px;
-  }
-  .dingbar .dgrp { display: flex; align-items: center; gap: 8px; }
-  .dingbar button {
-    padding: 5px 12px;
-    border: 1px solid var(--primary);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 11px;
-    background: var(--bg-card);
-    color: var(--primary);
-    transition: all 0.2s;
-  }
-  .dingbar button:hover { background: var(--primary-light); }
-  .dingbar button.ding-out { border-color: var(--error); color: var(--error); }
-  .dingbar button.ding-out:hover { background: #fff1f0; }
-  .dingbar button.ding-switch { border-color: var(--text-tertiary); color: var(--text-tertiary); }
-  .dingbar button.ding-switch:hover { background: var(--bg-page); }
-  .dingbar label { font-size: 12px; cursor: pointer; color: var(--text-secondary); }
-
-  .syncmsg { padding: 6px 20px; font-size: 13px; color: var(--success); font-weight: 500; }
-
-  .filters {
-    padding: 8px 16px;
-    background: var(--bg-card);
-    border-bottom: 1px solid var(--border-light);
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    align-items: center;
-  }
-  .filters select, .filters input {
-    padding: 5px 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    background: var(--bg-card);
-    color: var(--text-primary);
-  }
-  .filters select:focus, .filters input:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 2px rgba(22,119,255,0.1);
-  }
-  .filters button {
-    padding: 6px 16px;
-    background: var(--primary);
-    color: #fff;
-    border: 0;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 13px;
-    transition: all 0.2s;
-  }
-  .filters button:hover { background: var(--primary-hover); }
-  .filters button.alt {
-    background: var(--bg-card);
-    color: var(--primary);
-    border: 1px solid var(--primary);
-  }
-  .filters button.alt:hover { background: var(--primary-light); }
-
-  .pager { padding: 8px 20px; font-size: 13px; color: var(--text-tertiary); }
-  .pager button {
-    margin-left: 8px;
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-card);
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: 11px;
-  }
-  .pager button:hover { border-color: var(--primary); color: var(--primary); }
-
-  .wrap {
-    padding: 8px 10px 12px;
-    overflow-x: hidden;
-    overflow-y: visible;
-    max-width: 100vw;
-    background: var(--bg-page);
-  }
-  table {
-    width: 100%;
-    min-width: 0;
-    border-collapse: collapse;
-    background: var(--bg-card);
-    font-size: 10.5px;
-    table-layout: fixed;
-    border-radius: var(--radius-md);
-    overflow: hidden;
-    box-shadow: var(--shadow-sm);
-  }
-  th, td {
-    border: 1px solid var(--border-light);
-    padding: 4px 3px;
-    text-align: left;
-    vertical-align: top;
-    overflow: hidden;
-  }
-  th {
-    background: var(--bg-page);
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    white-space: nowrap;
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    border-bottom: 1px solid var(--border);
-  }
-  td.info { white-space: pre-line; line-height: 1.35; font-size: 10px; word-break: break-word; color: var(--text-secondary); }
-  td.cat { font-weight: 600; white-space: normal; overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
-
-  tr.special td { background: #fffbe6; }
-  tr.not_found td { background: #fff7e6; }
-  tr.not_found td.period { background: #ffe7ba; font-weight: 600; color: #d46b08; }
-  tr.filled td { background: #f6ffed; }
-  tr.srcfilled td { background: #e6fffb; }
-
-  .badge {
-    display: inline-block;
-    padding: 2px 6px;
-    border-radius: 10px;
-    color: #fff;
-    font-size: 10px;
-    font-weight: 500;
-    line-height: 1.4;
-  }
-  .badge.ai { background: var(--ai); }
-  .badge.gao { background: var(--gao); }
-  .badge.src { background: var(--success); }
-
-  .procbtn {
-    padding: 3px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    cursor: pointer;
-    background: var(--bg-card);
-    color: var(--text-secondary);
-    transition: all 0.2s;
-  }
-  .procbtn:hover { border-color: var(--primary); color: var(--primary); }
-  .procbtn.yes {
-    background: var(--primary);
-    color: #fff;
-    border-color: var(--primary);
-  }
-  .procbtn.yes:hover { background: var(--primary-hover); }
-
-  .reqbtn {
-    padding: 4px 10px;
-    border: 1px solid var(--primary);
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    cursor: pointer;
-    background: var(--bg-card);
-    color: var(--primary);
-    white-space: nowrap;
-    transition: all 0.2s;
-  }
-  .reqbtn:hover { background: var(--primary); color: #fff; }
-  .reqbtn:disabled {
-    background: var(--bg-page);
-    border-color: var(--border);
-    color: var(--text-tertiary);
-    cursor: not-allowed;
-  }
-
-  .order { font-family: Consolas, "SF Mono", monospace; font-size: 10.5px; word-break: break-all; color: var(--text-secondary); }
-
-  .fb {
-    width: 100%;
-    min-height: 22px;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    resize: none;
-    background: transparent;
-    font-family: inherit;
-    padding: 3px;
-    transition: all 0.2s;
-  }
-  .fb:hover { border-color: var(--border); }
-  .fb:focus {
-    border-color: var(--primary);
-    background: var(--bg-card);
-    outline: none;
-    box-shadow: 0 0 0 2px rgba(22,119,255,0.1);
-  }
-
-  .rmk {
-    width: 100%;
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    transition: all 0.2s;
-  }
-  .rmk:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 2px rgba(22,119,255,0.1);
-  }
-
-  .copyable { cursor: pointer; transition: background 0.2s; }
-  .copyable:hover { background: var(--primary-light); }
-
-  .talkcell { cursor: pointer; transition: background 0.2s; }
-  .talkcell:hover { background: var(--primary-light); }
-
-  .tk { white-space: pre-line; line-height: 1.45; font-size: 11px; word-break: break-word; }
-  .tk .t-talk { color: var(--success); font-weight: 500; }
-  .talk-wrap { display: flex; align-items: flex-start; gap: 6px; }
-  .tkwrap { flex: 1 1 auto; }
-
-  .genbtn {
-    flex: 0 0 auto;
-    padding: 3px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-page);
-    color: var(--text-tertiary);
-    font-size: 11px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: all 0.2s;
-  }
-  .genbtn:hover { border-color: var(--primary); color: var(--primary); }
-  .genbtn.on { background: var(--success); color: #fff; border-color: var(--success); }
-
-  .dingcell { font-size: 12px; line-height: 1.5; text-align: center; }
-
-  .dbtn {
-    padding: 3px 8px;
-    border: 1px solid var(--primary);
-    border-radius: var(--radius-sm);
-    background: var(--primary);
-    color: #fff;
-    font-size: 11px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: all 0.2s;
-  }
-  .dbtn:hover { background: var(--primary-hover); }
-  .dbtn:disabled {
-    background: var(--text-tertiary);
-    border-color: var(--text-tertiary);
-    color: #fff;
-    cursor: not-allowed;
-  }
-
-  .talkcell .dingbtn { display: none; }
-  .dingbtn {
-    padding: 3px 8px;
-    border: 1px solid var(--primary);
-    border-radius: var(--radius-sm);
-    background: var(--primary);
-    color: #fff;
-    font-size: 11px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: all 0.2s;
-  }
-  .dingbtn:hover { background: var(--primary-hover); }
-  .dingbtn.sent { background: var(--text-tertiary); border-color: var(--text-tertiary); }
-
-  .delbtn {
-    padding: 2px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-card);
-    color: var(--error);
-    font-size: 14px;
-    font-weight: 700;
-    cursor: pointer;
-    line-height: 1.4;
-    transition: all 0.2s;
-  }
-  .delbtn:hover { background: var(--error); color: #fff; border-color: var(--error); }
-
-  .selbox { width: 16px; height: 16px; cursor: pointer; accent-color: var(--primary); }
-
-  .selbar {
-    display: none;
-    padding: 8px 20px;
-    background: var(--primary-light);
-    border-bottom: 1px solid #bae0ff;
-    align-items: center;
-    gap: 10px;
-    font-size: 13px;
-  }
-  .selbar.show { display: flex; }
-  .selbar button {
-    padding: 5px 12px;
-    border: 1px solid var(--primary);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 11px;
-    background: var(--bg-card);
-    color: var(--primary);
-    transition: all 0.2s;
-  }
-  .selbar button:hover { background: var(--primary-light); }
-  .selbar button.primary { background: var(--primary); color: #fff; }
-  .selbar button.primary:hover { background: var(--primary-hover); }
-  .selbar button.danger { border-color: var(--error); color: var(--error); }
-  .selbar button.danger:hover { background: #fff1f0; }
-  .selbar .selcnt { font-weight: 600; color: var(--primary); }
-
-  .genbtn-all {
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-page);
-    color: var(--text-tertiary);
-    font-size: 11px;
-    cursor: pointer;
-    margin-left: 6px;
-    vertical-align: middle;
-    transition: all 0.2s;
-  }
-  .genbtn-all:hover { border-color: var(--primary); color: var(--primary); }
-  .genbtn-all.on { background: var(--success); color: #fff; border-color: var(--success); }
-
-  .footer {
-    padding: 10px 20px;
-    color: var(--text-tertiary);
-    font-size: 11px;
-    line-height: 1.6;
-  }
-  col.c-info { width: 19%; }
-  col.c-cat { width: 5.5%; }
-  col.c-fb { width: 9%; }
-  col.c-sel { width: 2.2%; }
-  col.c-sheet { width: 3%; }
-  col.c-row { width: 4%; }
-  col.c-date { width: 5.2%; }
-  col.c-period { width: 5%; }
-  col.c-phone { width: 6.2%; }
-  col.c-tutor { width: 6%; }
-  col.c-proc { width: 4.8%; }
-  col.c-talk { width: 9%; }
-  col.c-time { width: 5.6%; }
-  col.c-remark { width: 5.3%; }
-  col.c-action { width: 4.5%; }
-  col.c-del { width: 1.5%; }
-
-  .toast {
-    position: fixed;
-    background: var(--success);
-    color: #fff;
-    padding: 8px 16px;
-    border-radius: var(--radius-md);
-    font-size: 13px;
-    font-weight: 500;
-    z-index: 9999;
-    opacity: 0;
-    transition: opacity 0.2s, transform 0.2s;
-    pointer-events: none;
-    box-shadow: var(--shadow-lg);
-    white-space: nowrap;
-    transform: translateX(-50%) translateY(-10px);
-  }
-  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-  @media (max-width: 1100px) {
-    body { font-size: 12px; }
-    .top, .syncbar, .dingbar, .filters, .pager, .selbar, .footer { padding-left: 10px; padding-right: 10px; }
-    .top { gap: 8px; }
-    .top h1 { width: 100%; font-size: 15px; }
-    .stats { font-size: 11px; gap: 6px; }
-    .syncbar .grp { flex: 1 1 240px; justify-content: space-between; }
-    .filters input { flex: 1 1 180px; min-width: 0; }
-    .wrap { padding: 8px; }
-    table { min-width: 0; font-size: 10px; }
-    th, td { padding: 3px 2px; }
-    col.c-info { width: 18%; }
-    col.c-talk { width: 8%; }
-    col.c-fb { width: 8%; }
-  }
-  @media (max-width: 640px) {
-    .syncbar .grp, .dingbar .dgrp { flex: 1 1 100%; }
-    .syncbar input[type=number], .filters select, .filters button { width: 100%; }
-    .filters { align-items: stretch; }
-    .filters select, .filters input, .filters button { flex: 1 1 100%; }
-    .pager, .selbar { overflow-x: hidden; white-space: normal; }
-    .wrap { padding: 6px 4px; }
-  }
+  .toast { position:fixed; background:#22c55e; color:#fff; padding:6px 14px; border-radius:6px; font-size:13px; font-weight:600; z-index:9999; opacity:0; transition:opacity 0.2s; pointer-events:none; box-shadow:0 3px 12px rgba(34,197,94,0.4); white-space:nowrap; }
+  .toast.show { opacity:1; }
 
 </style>
 </head>
@@ -522,9 +110,6 @@
     <button onclick="dingLogout()" class="ding-out">退出</button>
     <button onclick="dingSwitchAccount()" class="ding-switch">切换账号</button>
   </div>
-  <div class="dgrp" style="margin-left:6px;">
-    <button onclick="tencentLogin()" title="在本页面显示二维码，手机扫码登录腾讯文档客诉表">腾讯文档登录</button>
-  </div>
   <div class="dgrp">
     <button onclick="dingSendSelected()" style="background:transparent;color:#1677ff;border-color:#1677ff;">发送选中</button>
   </div>
@@ -532,7 +117,7 @@
   <div class="dgrp" style="margin-left:12px;">
     <button class="alt" onclick="batchSendDingtalk()" title="批量发送所有二转话术到钉钉群">批量发送钉钉</button>
     <button class="alt" onclick="load(PAGE,true)">刷新列表</button>
-    <button onclick="resetTable()" style="background:#ff4d4f;color:#fff;border-color:#ff4d4f;">重置</button>
+    <button onclick="resetTable()" style="background:#c0392b;color:#fff;border-color:#c0392b;">重置</button>
   </div>
 </div>
 <div class="syncbar" style="background:#fff;border-top:none">
@@ -550,9 +135,9 @@
 <div class="wrap">
   <table>
     <colgroup>
-      <col class="c-sel"><col class="c-sheet"><col class="c-row"><col class="c-date"><col class="c-info"><col class="c-cat">
-      <col class="c-period"><col class="c-phone"><col class="c-tutor"><col class="c-proc"><col class="c-talk"><col class="c-time">
-      <col class="c-remark"><col class="c-fb"><col class="c-action"><col class="c-action"><col class="c-del">
+      <col style="width:2%"><col style="width:3.5%"><col style="width:4.5%"><col style="width:5.5%"><col class="c-info"><col class="c-cat">
+      <col style="width:5%"><col style="width:7%"><col style="width:7%"><col style="width:5.5%"><col style="width:9%"><col style="width:7%">
+      <col style="width:5.5%"><col class="c-fb"><col style="width:5.5%"><col style="width:5.5%"><col style="width:2%">
     </colgroup>
     <thead><tr>
       <th><input type="checkbox" class="selbox" id="selAll" onclick="toggleSelectAll(this)" title="全选/取消全选"></th><th>表</th><th>源表行</th><th>反馈时间</th><th>客户信息及反馈</th><th>问题归类</th>
@@ -561,11 +146,11 @@
     <tbody id="tbody"></tbody>
   </table>
 </div>
-<div class="footer">点"同步并查询"= 把源表该行号及以下的新数据拉进来并自动查询补全；黄色行=系统未掉落；绿色行=源表已填期次/手机号/顾问（默认已处理）。<span style="color:#1677ff;font-weight:700">（筛选修复版 v2）</span></div>
+<div class="footer">点"同步并查询"= 把源表该行号及以下的新数据拉进来并自动查询补全；黄色行=系统未掉落；绿色行=源表已填期次/手机号/顾问（默认已处理）。<span style="color:#2b579a;font-weight:700">（筛选修复版 v2）</span></div>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-const CAT_COLORS = { "未收到通知":"#fa8c16","正价退费纠纷":"#fa8c16","投诉助教服务":"#fa8c16","更换通知方式":"#fa8c16","承诺资料未给":"#f5222d","用户主动添加不成功":"#13c2c2" };
+const CAT_COLORS = { "未收到通知":"#F88825","正价退费纠纷":"#F88825","投诉助教服务":"#F88825","更换通知方式":"#F88825","承诺资料未给":"#FF0000","用户主动添加不成功":"#8CDDFA" };
 let PAGE = 0; const PAGE_SIZE = 300;
 	const _dingSent = new Set(); // 已发送钉钉的行ID
 let syncing = false;
@@ -617,9 +202,9 @@ let syncing = false;
 	  try {
 	    const r = await fetch('/api/delete-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids}) });
 	    const d = await r.json();
-	    showToast('已删除 ' + d.deleted + ' 条', d.deleted > 0 ? '#1f6e43' : '#ff4d4f');
+	    showToast('已删除 ' + d.deleted + ' 条', d.deleted > 0 ? '#27ae60' : '#c0392b');
 	  } catch(e) {
-	    showToast('删除失败', '#ff4d4f');
+	    showToast('删除失败', '#c0392b');
 	  }
 	  clearSelection();
 	  load(PAGE, true);
@@ -630,7 +215,7 @@ let syncing = false;
 	  try {
 	    await fetch('/api/query-one', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id}) });
 	    showToast('已提交补全', null, el);
-	    setMsg('正在补全该行...（自动刷新中）', '#1677ff');
+	    setMsg('正在补全该行...（自动刷新中）', '#2b579a');
 	    startPoll();
 	  } catch(e) {
 	    showToast('补全失败: ' + e.message, '#ef4444');
@@ -644,7 +229,7 @@ let syncing = false;
 	  try {
 	    await fetch('/api/query-batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids}) });
 	    showToast('已提交补全 ' + ids.length + ' 条');
-	    setMsg('正在补全 ' + ids.length + ' 条...（自动刷新中）', '#1677ff');
+	    setMsg('正在补全 ' + ids.length + ' 条...（自动刷新中）', '#2b579a');
 	    startPoll();
 	    clearSelection();
 	  } catch(e) {
@@ -757,7 +342,7 @@ function copyCell(el) { copyText((el.innerText || "").trim(), el); }
 function copyTalk(el) {
   const tk = el.querySelector(".tk");
   const wrap = el.querySelector(".tkwrap");
-  if (!tk || (wrap && getComputedStyle(wrap).display === "none")) { setMsg("请先点'生成'再复制话术", "#ff4d4f"); return; }
+  if (!tk || (wrap && getComputedStyle(wrap).display === "none")) { setMsg("请先点'生成'再复制话术", "#c0392b"); return; }
   copyText((tk.innerText || "").trim(), el);
 }
 async function sendToDingtalk(id) {
@@ -805,7 +390,7 @@ async function sendToDingtalk(id) {
 	  const oldNote = (TALK_CFG && TALK_CFG.periodRule && TALK_CFG.periodRule.oldNote) || "二转";
 	  const targets = rows.filter(r => (r.fill_tutor || r.src_tutor || "") === oldNote && !_dingSent.has(r.id));
 	  if (!targets.length) { showToast("没有待发送的二转记录", "#888"); return; }
-	  showToast("正在发送 " + targets.length + " 条…", "#1677ff");
+	  showToast("正在发送 " + targets.length + " 条…", "#2b579a");
 	  let ok = 0, fail = 0;
 	  for (const row of targets) {
 	    try {
@@ -824,7 +409,7 @@ async function sendToDingtalk(id) {
 	      else { fail++; }
 	    } catch (e) { fail++; }
 	  }
-	  showToast("发送完成: " + ok + " 条成功" + (fail ? ", " + fail + " 条失败" : ""), ok ? "#1f6e43" : "#ef4444");
+	  showToast("发送完成: " + ok + " 条成功" + (fail ? ", " + fail + " 条失败" : ""), ok ? "#1a6d1a" : "#ef4444");
 	}
 	async function deleteRow(id) {
 	  if (!confirm("确定删除此行？")) return;
@@ -854,10 +439,10 @@ async function toggleTalkGenAll(el) {
     const d = await r.json();
     el.classList.toggle("on", !!on);
     el.textContent = on ? "生成✓" : "生成";
-    setMsg(on ? ("已批量生成 " + (d.generated || 0) + " 条话术（绿色）") : "已全部撤销话术（灰色）", on ? "#1f6e43" : "#888");
+    setMsg(on ? ("已批量生成 " + (d.generated || 0) + " 条话术（绿色）") : "已全部撤销话术（灰色）", on ? "#1a6d1a" : "#888");
     load(PAGE, true);
     refreshGenAll();
-  } catch (e) { setMsg("操作失败: " + e.message, "#ff4d4f"); }
+  } catch (e) { setMsg("操作失败: " + e.message, "#c0392b"); }
 }
 function wbBadge(row) {
   const s = row.writeback_status || "";
@@ -865,10 +450,10 @@ function wbBadge(row) {
   const msg = row.writeback_msg ? ` title="${esc(row.writeback_msg)}"` : "";
   const map = {
     "": '<span style="color:#bbb">—</span>',
-    "ok": `<span style="color:#1f6e43;font-weight:700"${msg}>已回写</span>`,
-    "fail": `<span style="color:#ff4d4f;font-weight:700;cursor:help"${msg}>失败</span>`,
+    "ok": `<span style="color:#1a6d1a;font-weight:700"${msg}>已回写</span>`,
+    "fail": `<span style="color:#c0392b;font-weight:700;cursor:help"${msg}>失败</span>`,
     "dry_ok": `<span style="color:#999"${msg}>已定位</span>`,
-    "running": '<span style="color:#1677ff">回写中…</span>'
+    "running": '<span style="color:#2b579a">回写中…</span>'
   };
   return (map[s] || esc(s)) + at;
 }
@@ -912,15 +497,15 @@ async function load(offset, noCache) {
 
       <td><span class="badge ${row.sheet==="AI"?"ai":"gao"}">${esc(row.sheet)}</span></td>
       <td>${row.src_row}${row.mismatch ? (row.writeback_msg === "源表待填"
-        ? ' <span style="color:#fa8c16;font-weight:700;cursor:help" title="源表待填：网页已生成期次/电话/助教，尚未写入源表">⚠待填</span>'
-        : ' <span style="color:#ff4d4f;font-weight:700;cursor:help" title="源表已有不同内容，与网页不一致">⚠不一致</span>') : ''}</td>
+        ? ' <span style="color:#e67e22;font-weight:700;cursor:help" title="源表待填：网页已生成期次/电话/助教，尚未写入源表">⚠待填</span>'
+        : ' <span style="color:#c0392b;font-weight:700;cursor:help" title="源表已有不同内容，与网页不一致">⚠不一致</span>') : ''}</td>
       <td>${esc(row.feedback_date)}</td>
       <td class="info">${esc(row.customer_info)}</td>
       <td class="cat" ${catStyle}>${esc(row.category)}</td>
-      <td class="period copyable" onclick="copyCell(this)" title="点击复制">${esc(row.fill_period || row.src_period || "")}${row.query_status==="not_found"?' <span style="color:#ff4d4f;font-weight:700">[未掉落]</span>':""}</td>
+      <td class="period copyable" onclick="copyCell(this)" title="点击复制">${esc(row.fill_period || row.src_period || "")}${row.query_status==="not_found"?' <span style="color:#c0392b;font-weight:700">[未掉落]</span>':""}</td>
       <td class="order copyable" onclick="copyCell(this)" title="点击复制">${esc(row.fill_phone || row.src_phone || "")}</td>
       <td class="copyable" onclick="copyCell(this)" title="点击复制">${esc(row.fill_tutor || row.src_tutor || "")}${srcBadge}</td>
-      <td><button class="procbtn ${row.processed==="是"?"yes":""}" data-id="${row.id}" onclick="toggleProcessed(this)" style="background:${row.processed==="是"?"#1f3f6e":"#fff"};color:${row.processed==="是"?"#fff":"#333"};border:1px solid ${row.processed==="是"?"#1f3f6e":"#bbb"}">${row.processed==="是"?"是":"否"}</button></td>
+      <td><button class="procbtn ${row.processed==="是"?"yes":""}" data-id="${row.id}" onclick="toggleProcessed(this)" style="background:${row.processed==="是"?"#2b579a":"#fff"};color:${row.processed==="是"?"#fff":"#333"};border:1px solid ${row.processed==="是"?"#2b579a":"#bbb"}">${row.processed==="是"?"是":"否"}</button></td>
       <td class="talkcell" onclick="copyTalk(this)" title="点击复制话术"><div class="tkwrap" style="display:${row.talk_generated?'':'none'}">${talkBlock(row)}</div>${(row.fill_tutor || row.src_tutor || "") === ((TALK_CFG&&TALK_CFG.periodRule&&TALK_CFG.periodRule.oldNote)||"二转") ? '<button class="dingbtn' + (_dingSent.has(row.id)?' sent':'') + '" style="background:#4dc3ff;border:1px solid #4dc3ff;color:#fff" data-id="' + row.id + '" onclick="event.stopPropagation();sendToDingtalk('+row.id+')" title="发送到钉钉群">钉</button>' : ''}</td>
       <td>${esc(row.processed_at)}</td>
       <td><input class="rmk" value="${esc(row.internal_remark)}" data-id="${row.id}" onchange="saveRemark(this)"></td>
@@ -962,7 +547,7 @@ async function saveRemark(el) {
 }
 async function saveTalk(el) {
   await fetch("/api/talk", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id:Number(el.dataset.id), text:el.value}) });
-  el.style.borderColor = "#1f6e43";
+  el.style.borderColor = "#4c9a4c";
   setTimeout(() => el.style.borderColor = "", 1200);
 }
 let fbTimer = {};
@@ -980,21 +565,21 @@ async function pollStatus() {
       if (d.type && d.type.indexOf("钉钉") >= 0) {
         const dp = d.dingProgress;
         if (dp && dp.total > 0) {
-          setMsg(d.type + " 进行中… 已发送 " + Math.min(dp.done || 0, dp.total) + "/" + dp.total + "（自动刷新中）", "#1677ff");
+          setMsg(d.type + " 进行中… 已发送 " + Math.min(dp.done || 0, dp.total) + "/" + dp.total + "（自动刷新中）", "#2b579a");
         } else {
-          setMsg(d.type + " 进行中…（自动刷新中）", "#1677ff");
+          setMsg(d.type + " 进行中…（自动刷新中）", "#2b579a");
         }
       } else {
-        setMsg((d.type || "任务") + " 进行中… 已补全 " + filled + "/" + records + (blanks ? "（另有 " + blanks + " 行空白）" : "") + "（自动刷新中）", "#1677ff");
+        setMsg((d.type || "任务") + " 进行中… 已补全 " + filled + "/" + records + (blanks ? "（另有 " + blanks + " 行空白）" : "") + "（自动刷新中）", "#2b579a");
       }
       load(PAGE, true);
     } else {
       quietPoll++;
       if (quietPoll >= 2) {
         if (d.type && d.type.indexOf("钉钉") >= 0) {
-          setMsg("已完成：" + d.type, "#1f6e43");
+          setMsg("已完成：" + d.type, "#1a6d1a");
         } else {
-          setMsg("已完成：" + (d.type || "任务") + "，已补全 " + filled + "/" + records + (blanks ? "（另有 " + blanks + " 行空白）" : "") + "，待补全 " + pending, "#1f6e43");
+          setMsg("已完成：" + (d.type || "任务") + "，已补全 " + filled + "/" + records + (blanks ? "（另有 " + blanks + " 行空白）" : "") + "，待补全 " + pending, "#1a6d1a");
         }
         load(PAGE, true);
         stopPoll();
@@ -1014,17 +599,17 @@ function debounceFeedback(el) {
 async function saveFeedback(el) {
   const r = await fetch("/api/feedback", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id:Number(el.dataset.id), text:el.value}) });
   const d = await r.json();
-  el.style.borderColor = "#1f6e43";
+  el.style.borderColor = "#4c9a4c";
   setTimeout(() => el.style.borderColor = "", 1200);
   if (d.writeback === "started") { setMsg("反馈已保存，正在后台回写源表 H/I（自动刷新中）"); startPoll(); }
 }
-function setMsg(m, color) { const el = $("syncmsg"); el.textContent = m; el.style.color = color || "#1f6e43"; }
+function setMsg(m, color) { const el = $("syncmsg"); el.textContent = m; el.style.color = color || "#1a6d1a"; }
 var _toastTimer = null;
 function showToast(msg, color, el) {
   var t = document.getElementById("toast");
   if (!t) return;
   t.textContent = msg;
-  t.style.background = color || "#1f6e43";
+  t.style.background = color || "#22c55e";
   if (el) {
     var r = el.getBoundingClientRect();
     t.style.top = (r.top - 30) + "px";
@@ -1039,8 +624,8 @@ function showToast(msg, color, el) {
 async function doSync(sheet) {
   const input = sheet === "AI" ? $("aiStart") : $("gaoStart");
   const startRow = Number(input.value);
-  if (!startRow || startRow < 3) { setMsg("请先输入起始行号（>=3），如 " + (sheet === "AI" ? "10870" : "2707"), "#ff4d4f"); return; }
-  if (syncing) { setMsg("已有同步/查询在进行中，请稍候...", "#ff4d4f"); return; }
+  if (!startRow || startRow < 3) { setMsg("请先输入起始行号（>=3），如 " + (sheet === "AI" ? "10870" : "2707"), "#c0392b"); return; }
+  if (syncing) { setMsg("已有同步/查询在进行中，请稍候...", "#c0392b"); return; }
   syncing = true;
   $("btnSyncAI").disabled = true; $("btnSyncGao").disabled = true;
   setMsg((sheet === "AI" ? "AI表" : "高表") + " 正在从第 " + startRow + " 行同步（约1分钟，请勿关闭页面）...");
@@ -1054,7 +639,7 @@ async function doSync(sheet) {
     load(0, true);
     startPoll();
   } catch (e) {
-    setMsg("同步失败: " + e.message, "#ff4d4f");
+    setMsg("同步失败: " + e.message, "#c0392b");
   } finally {
     syncing = false;
     $("btnSyncAI").disabled = false; $("btnSyncGao").disabled = false;
@@ -1067,38 +652,38 @@ async function resetTable() {
     await fetch("/api/reset", { method:"POST", headers:{"Content-Type":"application/json"}, body: "{}" });
     setMsg("???????????");
     load(0, true);
-  } catch (e) { setMsg("????: " + e.message, "#ff4d4f"); }
+  } catch (e) { setMsg("????: " + e.message, "#c0392b"); }
 }
 async function doQuery() {
   const sheet = $("fSheet").value || "AI";
-  if (syncing) { setMsg("已有操作进行中，请稍候...", "#ff4d4f"); return; }
+  if (syncing) { setMsg("已有操作进行中，请稍候...", "#c0392b"); return; }
   syncing = true;
   $("btnSyncAI").disabled = true; $("btnSyncGao").disabled = true;
-  setMsg((sheet === "AI" ? "AI表" : "高表") + " 查询补全已开始（几分钟），自动刷新中...", "#1677ff");
+  setMsg((sheet === "AI" ? "AI表" : "高表") + " 查询补全已开始（几分钟），自动刷新中...", "#2b579a");
   try {
     await fetch("/api/query", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sheet}) });
     startPoll();
-  } catch (e) { setMsg("查询请求失败: " + e.message, "#ff4d4f"); syncing = false; $("btnSyncAI").disabled = false; $("btnSyncGao").disabled = false; }
+  } catch (e) { setMsg("查询请求失败: " + e.message, "#c0392b"); syncing = false; $("btnSyncAI").disabled = false; $("btnSyncGao").disabled = false; }
 }
 async function batchFill(sheet) {
-  if (syncing) { setMsg("已有操作进行中，请稍候...", "#ff4d4f"); return; }
+  if (syncing) { setMsg("已有操作进行中，请稍候...", "#c0392b"); return; }
   syncing = true;
   $("btnSyncAI").disabled = true; $("btnSyncGao").disabled = true;
   if ($("btnBatchAI")) $("btnBatchAI").disabled = true;
   if ($("btnBatchGao")) $("btnBatchGao").disabled = true;
-  setMsg((sheet === "AI" ? "AI表" : "高表") + " 批量检查中（需等待约 60-90 秒，页面会自动刷新结果）...", "#1677ff");
+  setMsg((sheet === "AI" ? "AI表" : "高表") + " 批量检查中（需等待约 60-90 秒，页面会自动刷新结果）...", "#2b579a");
   try {
     const r = await fetch("/api/writeback-all", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sheet, phase:"check"}) });
     const d = await r.json();
     if (d.needWait) {
-      setMsg("还有 " + (d.pending || 0) + " 条信息未生成完（待补全），请等待查询补全完成后（待补全=0）再批量回填", "#ff4d4f");
+      setMsg("还有 " + (d.pending || 0) + " 条信息未生成完（待补全），请等待查询补全完成后（待补全=0）再批量回填", "#c0392b");
       syncing = false; enableBtns(); return;
     }
-    if (!d.async) { setMsg("批量检查启动失败：" + (d.reason || "未知"), "#ff4d4f"); syncing = false; enableBtns(); return; }
+    if (!d.async) { setMsg("批量检查启动失败：" + (d.reason || "未知"), "#c0392b"); syncing = false; enableBtns(); return; }
     // 异步轮询等待结果
     await pollBatchResult(sheet, "check");
   } catch (e) {
-    setMsg("批量检查请求失败: " + e.message, "#ff4d4f");
+    setMsg("批量检查请求失败: " + e.message, "#c0392b");
     syncing = false; enableBtns();
   }
 }
@@ -1117,15 +702,15 @@ async function pollBatchResult(sheet, phase) {
       const st = await sr.json();
       if (st.lastPhase !== phase) continue; // 不是我们的结果
       if (st.running) {
-        setMsg(label + "进行中...（已等待 " + elapsed + " 秒）", "#1677ff");
+        setMsg(label + "进行中...（已等待 " + elapsed + " 秒）", "#2b579a");
         continue;
       }
       // 任务完成
       const res = st.lastResult;
-      if (!res) { setMsg(label + "完成但无结果", "#ff4d4f"); syncing = false; enableBtns(); return; }
+      if (!res) { setMsg(label + "完成但无结果", "#c0392b"); syncing = false; enableBtns(); return; }
       if (phase === "check") {
         if (res.ok) {
-          setMsg("核对通过：顶" + res.top + " / 中" + res.middle + " / 底" + res.bottom + " 行号与订单号均与源表一致（共 " + res.N + " 条记录）", "#1f6e43");
+          setMsg("核对通过：顶" + res.top + " / 中" + res.middle + " / 底" + res.bottom + " 行号与订单号均与源表一致（共 " + res.N + " 条记录）", "#1a6d1a");
           if (confirm("核对通过：第 " + res.top + " - " + res.bottom + " 行（共 " + res.N + " 条记录），起始/最底/中间行的行号与订单号与源表一致。\n\n是否执行批量回填？将把网页的期次/电话/助教整体覆盖到源表对应行。\n选'是'执行，选'否'取消。")) {
             syncing = false; enableBtns();
             await batchFillExec(sheet);
@@ -1134,22 +719,22 @@ async function pollBatchResult(sheet, phase) {
             setMsg("已取消批量回填", "#888");
           }
         } else {
-          setMsg("批量检查失败：" + (res.reason || "未知错误"), "#ff4d4f");
+          setMsg("批量检查失败：" + (res.reason || "未知错误"), "#c0392b");
         }
       } else {
         if (res.ok) {
-          setMsg("批量回填成功：已写入 " + (res.written || 0) + " 条记录（第" + res.top + "-" + res.bottom + " 行），末尾校验通过", "#1f6e43");
+          setMsg("批量回填成功：已写入 " + (res.written || 0) + " 条记录（第" + res.top + "-" + res.bottom + " 行），末尾校验通过", "#1a6d1a");
           load(0, true);
           startPoll();
         } else {
-          setMsg("批量回填" + (res.rolledBack ? "失败但已撤销粘贴" : "未执行") + "：" + (res.reason || "未知原因"), "#ff4d4f");
+          setMsg("批量回填" + (res.rolledBack ? "失败但已撤销粘贴" : "未执行") + "：" + (res.reason || "未知原因"), "#c0392b");
         }
       }
       syncing = false; enableBtns();
       return;
     } catch (e) { /* 轮询失败，继续 */ }
   }
-  setMsg(label + "超时（3分钟未完成），请刷新页面查看状态", "#ff4d4f");
+  setMsg(label + "超时（3分钟未完成），请刷新页面查看状态", "#c0392b");
   syncing = false; enableBtns();
 }
 async function batchFillExec(sheet) {
@@ -1157,14 +742,14 @@ async function batchFillExec(sheet) {
   $("btnSyncAI").disabled = true; $("btnSyncGao").disabled = true;
   if ($("btnBatchAI")) $("btnBatchAI").disabled = true;
   if ($("btnBatchGao")) $("btnBatchGao").disabled = true;
-  setMsg((sheet === "AI" ? "AI表" : "高表") + " 批量回填执行中（粘贴+末尾校验，约需 60-90 秒）...", "#1677ff");
+  setMsg((sheet === "AI" ? "AI表" : "高表") + " 批量回填执行中（粘贴+末尾校验，约需 60-90 秒）...", "#2b579a");
   try {
     const r = await fetch("/api/writeback-all", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sheet, phase:"exec"}) });
     const d = await r.json();
-    if (!d.async) { setMsg("批量回填启动失败：" + (d.reason || "未知"), "#ff4d4f"); syncing = false; enableBtns(); return; }
+    if (!d.async) { setMsg("批量回填启动失败：" + (d.reason || "未知"), "#c0392b"); syncing = false; enableBtns(); return; }
     await pollBatchResult(sheet, "exec");
   } catch (e) {
-    setMsg("批量回填请求失败: " + e.message, "#ff4d4f");
+    setMsg("批量回填请求失败: " + e.message, "#c0392b");
     syncing = false; enableBtns();
   }
 }
@@ -1176,98 +761,10 @@ async function refreshDing() {
     DING_CFG = await r.json();
   } catch (e) { DING_CFG = { available: false, loggedIn: false, auto: false }; }
   const el = $("dingStatus"); if (!el) return;
-  if (!DING_CFG.available) el.innerHTML = '钉钉：<span style="color:#ff4d4f">未安装 dws</span>';
-  else if (DING_CFG.loggedIn) el.innerHTML = '钉钉：<span style="color:#1f6e43">已登录</span> <span style="font-weight:400;font-size:10px;color:#888">' + esc(DING_CFG.userName || '') + '</span>';
-  else el.innerHTML = '钉钉：<span style="color:#fa8c16">未登录</span>';
+  if (!DING_CFG.available) el.innerHTML = '钉钉：<span style="color:#c0392b">未安装 dws</span>';
+  else if (DING_CFG.loggedIn) el.innerHTML = '钉钉：<span style="color:#1a6d1a">已登录</span> <span style="font-weight:400;font-size:10px;color:#888">' + esc(DING_CFG.userName || '') + '</span>';
+  else el.innerHTML = '钉钉：<span style="color:#e67e22">未登录</span>';
   const auto = $("dingAuto"); if (auto) auto.checked = !!DING_CFG.auto;
-}
-let tencentPollTimer = null;
-function tencentQrModal(show, inner) {
-  let ov = $("tencentQrOv");
-  if (show && !ov) {
-    ov = document.createElement("div");
-    ov.id = "tencentQrOv";
-    ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10000;display:flex;align-items:center;justify-content:center;";
-    ov.addEventListener("click", e => { if (e.target === ov) tencentCloseQr(); });
-    document.body.appendChild(ov);
-  }
-  if (!ov) return;
-  if (!show) { ov.remove(); return; }
-  ov.innerHTML = inner;
-}
-function tencentCloseQr() {
-  if (tencentPollTimer) { clearInterval(tencentPollTimer); tencentPollTimer = null; }
-  tencentQrModal(false);
-}
-async function tencentLogin() {
-  try {
-    tencentQrModal(true, '<div style="background:#fff;border-radius:12px;padding:24px 28px;text-align:center;max-width:360px;box-shadow:0 8px 30px rgba(0,0,0,.2)">'
-      + '<div style="font-size:15px;font-weight:600;color:#333;margin-bottom:12px">腾讯文档扫码登录</div>'
-      + '<div id="tencentQrBox" style="font-size:13px;color:#888;padding:30px 0">正在检测登录状态…</div>'
-      + '<div id="tencentQrMsg" style="font-size:13px;color:#1677ff;min-height:18px"></div>'
-      + '<div style="margin-top:14px;display:flex;gap:10px;justify-content:center">'
-      + '<button onclick="tencentRefreshQr()" style="border:1px solid #1677ff;background:#fff;color:#1677ff;border-radius:6px;padding:5px 18px;cursor:pointer">刷新二维码</button>'
-      + '<button onclick="tencentRelogin()" style="border:1px solid #ff9c2c;background:#fff;color:#ff7a00;border-radius:6px;padding:5px 18px;cursor:pointer">重新登录</button>'
-      + '<button onclick="tencentCloseQr()" style="border:1px solid #ddd;background:#fff;color:#666;border-radius:6px;padding:5px 18px;cursor:pointer">关闭</button>'
-      + '</div></div>');
-    const r = await fetch("/api/tencent/login", { method:"POST", headers:{"Content-Type":"application/json"}, body:"{}" });
-    const d = await r.json();
-    setMsg(d.message || "已触发登录", "#1677ff");
-    if (tencentPollTimer) clearInterval(tencentPollTimer);
-    tencentPollTimer = setInterval(tencentPollQr, 3000);
-    tencentPollQr();
-  } catch (e) { setMsg("腾讯文档登录请求失败: " + e.message, "#ff4d4f"); tencentCloseQr(); }
-}
-async function tencentPollQr() {
-  try {
-    const r = await fetch("/api/tencent/qrcode", { cache: "no-store" });
-    const d = await r.json();
-    const box = $("tencentQrBox"), msg = $("tencentQrMsg");
-    if (!box) { tencentCloseQr(); return; }
-    if (d.state === "done") {
-      const already = d.message && String(d.message).includes("已登录");
-      if (msg) msg.textContent = already ? "当前已登录，客诉表可后台查询/回填" : "登录成功！客诉表已可后台查询/回填";
-      if (msg) msg.style.color = "#1f6e43";
-      if (box) box.innerHTML = already
-        ? '<div style="font-size:36px">✓</div><div style="margin-top:8px;color:#1f6e43;font-weight:600">当前已登录</div><div style="margin-top:6px;color:#888;font-size:12px">如需更换账号，请点下方「重新登录」</div>'
-        : '<div style="font-size:40px">✓</div><div style="margin-top:8px;color:#1f6e43">登录成功</div>';
-      setMsg(already ? "腾讯文档已登录" : "腾讯文档登录成功", "#1f6e43");
-      return;
-    }
-    if (d.state === "error") {
-      if (msg) { msg.textContent = d.message || "登录失败，请重试"; msg.style.color = "#ff4d4f"; }
-      if (box) box.innerHTML = '<div style="color:#ff4d4f;padding:20px 0">' + (esc(d.message) || "登录失败") + '</div>';
-      clearInterval(tencentPollTimer); tencentPollTimer = null;
-      return;
-    }
-    if (d.qr) {
-      if (box && box.dataset.qr !== d.qr) { box.dataset.qr = d.qr; box.innerHTML = '<img src="' + d.qr + '" style="width:240px;height:240px;border:1px solid #eee;border-radius:8px">'; }
-      if (msg) { msg.textContent = "请用手机微信/QQ 扫码登录"; msg.style.color = "#1677ff"; }
-    } else if (d.state === "starting") {
-      if (box) box.textContent = "正在生成二维码…";
-    }
-  } catch (e) { /* 轮询中忽略网络抖动 */ }
-}
-async function tencentRefreshQr() {
-  const box = $("tencentQrBox"), msg = $("tencentQrMsg");
-  if (box) { box.innerHTML = '<div style="color:#888;padding:30px 0">正在刷新二维码…</div>'; box.dataset.qr = ""; }
-  if (msg) { msg.textContent = "正在重新生成二维码…"; msg.style.color = "#1677ff"; }
-  try {
-    await fetch("/api/tencent/refresh-qr", { method:"POST", headers:{"Content-Type":"application/json"}, body:"{}" });
-  } catch (e) { if (msg) { msg.textContent = "刷新请求失败: " + e.message; msg.style.color = "#ff4d4f"; } }
-}
-async function tencentRelogin() {
-  const box = $("tencentQrBox"), msg = $("tencentQrMsg");
-  if (box) { box.innerHTML = '<div style="color:#888;padding:30px 0">正在退出登录…</div>'; box.dataset.qr = ""; }
-  if (msg) { msg.textContent = "正在退出登录并重新生成二维码…"; msg.style.color = "#ff7a00"; }
-  try {
-    const r = await fetch("/api/tencent/login", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ force: true }) });
-    const d = await r.json();
-    if (msg) { msg.textContent = d.message || "正在退出登录…"; msg.style.color = "#ff7a00"; }
-    if (tencentPollTimer) clearInterval(tencentPollTimer);
-    tencentPollTimer = setInterval(tencentPollQr, 3000);
-    tencentPollQr();
-  } catch (e) { if (msg) { msg.textContent = "重新登录失败: " + e.message; msg.style.color = "#ff4d4f"; } }
 }
 async function dingLogin() {
   const popup = window.open("", "_blank");
@@ -1276,13 +773,13 @@ async function dingLogin() {
     const d = await r.json();
     if (d.device) {
       if (popup) popup.location.href = d.url; else window.open(d.url, "_blank");
-      setMsg("验证码：" + d.code + " ，请在新打开的页面中扫码", "#1677ff");
+      setMsg("验证码：" + d.code + " ，请在新打开的页面中扫码", "#2b579a");
       setTimeout(refreshDing, 8000);
     } else {
       if (popup) popup.close();
-      setMsg(d.message || "无法获取登录链接", "#ff4d4f");
+      setMsg(d.message || "无法获取登录链接", "#c0392b");
     }
-  } catch (e) { if (popup) popup.close(); setMsg("钉钉登录请求失败: " + e.message, "#ff4d4f"); }
+  } catch (e) { if (popup) popup.close(); setMsg("钉钉登录请求失败: " + e.message, "#c0392b"); }
 }async function dingSwitchAccount() {
   if (!confirm("确定要切换钉钉账号？将退出当前登录并重新授权。")) return;
   const popup = window.open("", "_blank");
@@ -1291,25 +788,25 @@ async function dingLogin() {
     const d = await r.json();
     if (d.device) {
       if (popup) popup.location.href = d.url; else window.open(d.url, "_blank");
-      setMsg("验证码：" + d.code + " ，请在新打开的页面中扫码", "#1677ff");
+      setMsg("验证码：" + d.code + " ，请在新打开的页面中扫码", "#2b579a");
       setTimeout(refreshDing, 8000);
     } else {
       if (popup) popup.close();
-      setMsg(d.message || "切换失败", "#ff4d4f");
+      setMsg(d.message || "切换失败", "#c0392b");
     }
-  } catch (e) { if (popup) popup.close(); setMsg("切换请求失败: " + e.message, "#ff4d4f"); }
+  } catch (e) { if (popup) popup.close(); setMsg("切换请求失败: " + e.message, "#c0392b"); }
 }async function dingLogout() {
   try {
     const r = await fetch("/api/ding/logout", { method:"POST", headers:{"Content-Type":"application/json"}, body:"{}" });
     const d = await r.json();
-    setMsg(d.message || "已退出", d.ok ? "#1f6e43" : "#ff4d4f");
+    setMsg(d.message || "已退出", d.ok ? "#1a6d1a" : "#c0392b");
     setTimeout(refreshDing, 2000);
-  } catch (e) { setMsg("退出登录请求失败: " + e.message, "#ff4d4f"); }
+  } catch (e) { setMsg("退出登录请求失败: " + e.message, "#c0392b"); }
 }
 async function dingAutoSave() {
   const on = $("dingAuto").checked;
   try { await fetch("/api/ding/settings", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({auto:on}) }); } catch (e) {}
-  setMsg(on ? "已开启：回填成功后自动发钉钉" : "已关闭自动发钉钉", "#1f6e43");
+  setMsg(on ? "已开启：回填成功后自动发钉钉" : "已关闭自动发钉钉", "#1a6d1a");
 }
 function dingSelectedIds() { return [...document.querySelectorAll(".selbox:checked")].map(x => Number(x.dataset.id)).filter(n => n > 0); }
 function dingBadge(row) {
@@ -1318,10 +815,10 @@ function dingBadge(row) {
   const msg = row.ding_msg ? ' title="' + esc(row.ding_msg) + '"' : "";
   const map = {
     "": '<span style="color:#bbb">未发</span>',
-    "ok": '<span style="color:#1f6e43;font-weight:700"' + msg + '>已发送</span>',
-    "fail": '<span style="color:#ff4d4f;font-weight:700;cursor:help"' + msg + '>失败</span>',
+    "ok": '<span style="color:#1a6d1a;font-weight:700"' + msg + '>已发送</span>',
+    "fail": '<span style="color:#c0392b;font-weight:700;cursor:help"' + msg + '>失败</span>',
     "skip": '<span style="color:#999"' + msg + '>跳过</span>',
-    "sending": '<span style="color:#1677ff">发送中…</span>'
+    "sending": '<span style="color:#2b579a">发送中…</span>'
   };
   return (map[s] || esc(s)) + at;
 }
@@ -1335,7 +832,7 @@ async function dingSendOne(el) {
   const isSecond = tutor === oldNote;
   el.disabled = true;
   if (isSecond) {
-    setMsg("正在发送二转群消息...", "#1677ff");
+    setMsg("正在发送二转群消息...", "#2b579a");
     try {
       const period = row.fill_period || row.src_period || "";
       const phone = row.fill_phone || row.src_phone || "";
@@ -1352,13 +849,13 @@ async function dingSendOne(el) {
       else { showToast("发送失败: " + (d2.error || "未知"), "#ef4444"); el.disabled = false; }
     } catch (e) { showToast("发送失败: " + e.message, "#ef4444"); el.disabled = false; }
   } else {
-    if (!DING_CFG.available) { setMsg("未安装 dws，请先安装", "#ff4d4f"); el.disabled = false; return; }
-    setMsg("正在发送钉钉消息...", "#1677ff");
+    if (!DING_CFG.available) { setMsg("未安装 dws，请先安装", "#c0392b"); el.disabled = false; return; }
+    setMsg("正在发送钉钉消息...", "#2b579a");
     try {
       const r2 = await fetch("/api/ding/send", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ids:[id]}) });
       const d2 = await r2.json();
-      setMsg(d2.message || "已加入发送队列", "#1f6e43");
-    } catch (e) { setMsg("发送请求失败: " + e.message, "#ff4d4f"); el.disabled = false; }
+      setMsg(d2.message || "已加入发送队列", "#1a6d1a");
+    } catch (e) { setMsg("发送请求失败: " + e.message, "#c0392b"); el.disabled = false; }
     startPoll();
   }
 }
@@ -1377,7 +874,7 @@ async function dingSendSelected() {
     if (selIds.length > 0 && !selIds.includes(r.id)) return false;
     return true;
   });
-  if (!targets.length) { setMsg("当前页没有可发送的行", "#ff4d4f"); return; }
+  if (!targets.length) { setMsg("当前页没有可发送的行", "#c0392b"); return; }
   const secondRows = targets.filter(r => (r.fill_tutor || r.src_tutor || "") === oldNote);
   const singleRows = targets.filter(r => (r.fill_tutor || r.src_tutor || "") !== oldNote);
   let msg = [];
@@ -1406,17 +903,17 @@ async function dingSendSelected() {
       msg.push(singleRows.length + " 条单聊已发送");
     } catch (e) { msg.push("单聊发送失败: " + e.message); }
   }
-  setMsg(msg.join("；") || "无有效发送", "#1f6e43");
+  setMsg(msg.join("；") || "无有效发送", "#1a6d1a");
   startPoll();
 }
 async function dingSendAll() {
   if (!confirm("将发送所有已生成话术、但尚未发送或发送失败的单（二转发群，单聊发个人），是否继续？")) return;
-  setMsg("正在发送全部未发...", "#1677ff");
+  setMsg("正在发送全部未发...", "#2b579a");
   try {
     const r = await fetch("/api/ding/send-all", { method:"POST", headers:{"Content-Type":"application/json"}, body:"{}" });
     const d = await r.json();
-    setMsg(d.message || "已加入发送队列", "#1f6e43");
-  } catch (e) { setMsg("发送请求失败: " + e.message, "#ff4d4f"); }
+    setMsg(d.message || "已加入发送队列", "#1a6d1a");
+  } catch (e) { setMsg("发送请求失败: " + e.message, "#c0392b"); }
   startPoll();
 }
 function onFilterChange() { PAGE = 0; load(0); }

@@ -423,9 +423,17 @@ async function batchExec() {
 }
 
 if (BATCH) {
-  if (BATCH_PHASE === "check") await batchCheck();
-  else if (BATCH_PHASE === "exec") await batchExec();
-  else { log("--batch 需 --phase check|exec"); db.close(); process.exit(1); }
+  try {
+    if (BATCH_PHASE === "check") await batchCheck();
+    else if (BATCH_PHASE === "exec") await batchExec();
+    else { log("--batch 需 --phase check|exec"); db.close(); process.exit(1); }
+  } catch (e) {
+    // 启动失败/浏览器异常等不能静默退出——必须回传 __BATCH_JSON__，前端才能显示真实原因
+    const phaseName = BATCH_PHASE === "check" ? "检查" : "执行";
+    console.log("__BATCH_JSON__" + JSON.stringify({ ok: false, phase: BATCH_PHASE, sheet: batchSheet, reason: "批量" + phaseName + "异常: " + String(e.message || e).split("\n")[0] }));
+    try { db.close(); } catch {}
+    process.exit(1);
+  }
   process.exit(0);
 }
 

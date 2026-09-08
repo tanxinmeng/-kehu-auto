@@ -1,4 +1,7 @@
 node_modules/
 data/
+profile/
+backup_*/
 .claude/
 *.log
+config.json

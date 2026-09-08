@@ -23,6 +23,7 @@ const dataDir = path.join(ROOT, config.dataDir || "data");
 const db = openDb(dataDir);
 const dingCfg = config.dingtalk || {};
 const tutorMapFile = path.join(dataDir, "tutor_map.json");
+const progressFile = path.join(dataDir, "ding_progress.json");
 const args = process.argv.slice(2);
 function arg(name) { const i = args.indexOf("--" + name); return i >= 0 ? args[i + 1] : null; }
 const IDS = String(arg("id") || "").split(",").map(s => Number(String(s).trim())).filter(n => n > 0);
@@ -32,6 +33,13 @@ const TMPL = dingCfg.messageTemplate || "【客诉提醒】订单 {order_no}（{
 const nowStr = () => new Date().toLocaleString("zh-CN");
 
 function log(m) { console.log(m); }
+
+function writeProgress(total, done) {
+  try { fs.writeFileSync(progressFile, JSON.stringify({ total, done, updatedAt: Date.now() }), "utf8"); } catch (e) {}
+}
+function clearProgress() {
+  try { fs.unlinkSync(progressFile); } catch (e) {}
+}
 
 function sendWebhook(text) {
   return new Promise((resolve) => {
@@ -338,14 +346,20 @@ async function main() {
     targets = db.prepare(`SELECT * FROM complaints WHERE query_status != 'not_found' AND fill_tutor IS NOT NULL AND fill_tutor != '' AND fill_period IS NOT NULL AND fill_period != '' AND fill_period != '系统未掉落' AND fill_phone IS NOT NULL AND fill_phone != '' AND (fill_tutor NOT LIKE '%爱芯过滤%' AND fill_tutor NOT LIKE '%正价课拦截%') AND (ding_status IS NULL OR ding_status='' OR ding_status='fail')`).all();
   }
   if (!targets.length) {
+    clearProgress();
     log("__DING_JSON__" + JSON.stringify({ ok: true, sent: 0, fail: 0, skipped: 0, reason: "没有待发送的记录" }));
     db.close(); process.exit(0);
   }
   const auth = await authStatus(bin);
   const tutorMap = loadTutorMap();
   let sent = 0, fail = 0, skipped = 0;
+  let done = 0;
+  const total = targets.length;
   const results = [];
+  writeProgress(total, 0);
   for (const t of targets) {
+    done++;
+    writeProgress(total, done);
     const tutor = String(t.fill_tutor || t.src_tutor || "").trim();
     let searchHint = "";
     if (!tutor) {
@@ -416,6 +430,7 @@ async function main() {
       log(`[${t.id}] ${t.sheet} 单${t.order_no} 已发送给 ${tutor}`);
     }
   }
+  clearProgress();
   log("钉钉发送完成: 成功 " + sent + ", 失败 " + fail + ", 跳过 " + skipped);
   log("__DING_JSON__" + JSON.stringify({ ok: fail === 0, sent, fail, skipped, results }));
   db.close();

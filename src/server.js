@@ -4,7 +4,7 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import fs from "node:fs";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import config from "../config.json" with { type: "json" };
 import { openDb } from "./db.js";
 
@@ -15,6 +15,18 @@ const port = config.web.port || 8766;
 const dingCfg = config.dingtalk || {};
 const dingSettingsFile = path.join(dataDir, "ding_settings.json");
 function readDingSettings() { try { return JSON.parse(fs.readFileSync(dingSettingsFile, "utf8")); } catch { return {}; } }
+// 快速判断腾讯文档是否已登录：只查 session.json 里 docs.qq.com 的 SID/uid 未过期，避免每次点登录都启动浏览器等 9 秒
+function tencentLoggedIn() {
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(dataDir, "session.json"), "utf8"));
+    const cookies = s.cookies || [];
+    const now = Date.now() / 1000;
+    const find = (name) => cookies.find(c => /\.?docs\.qq\.com$/i.test(c.domain || "") && c.name === name && c.value);
+    const sid = find("SID");
+    const uid = find("uid");
+    return !!(sid && uid && (sid.expires === -1 || sid.expires > now));
+  } catch { return false; }
+}
 function dingAutoEnabled() {
   if (dingCfg.enabled === false) return false;
   const s = readDingSettings();
@@ -89,24 +101,31 @@ function findDwsBin() {
 // 运行脚本并收集输出
 function runScript(script, args, timeoutMs = 10 * 60 * 1000) {
   return new Promise((resolve) => {
-    execFile(process.execPath, [path.join(ROOT, "src", script), ...args], { cwd: ROOT, timeout: timeoutMs },
-      (err, stdout, stderr) => {
-        resolve({ err, stdout: String(stdout || ""), stderr: String(stderr || "") });
-      });
+    let done = false;
+    const child = execFile(process.execPath, [path.join(ROOT, "src", script), ...args], { cwd: ROOT },
+      (err, stdout, stderr) => { done = true; resolve({ err, stdout: String(stdout || ""), stderr: String(stderr || "") }); });
+    // 不用 execFile 自带 timeout：它只杀 node 本体，Playwright 拉起的 Edge 会残留占住 profile，
+    // 导致后续批量任务卡死在启动阶段；必须 taskkill 整棵进程树
+    const killer = setTimeout(() => {
+      if (done) return;
+      console.log("[runScript] " + script + " 超时，强杀进程树 pid=" + child.pid);
+      try { spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"]); } catch {}
+    }, timeoutMs);
+    child.on("exit", () => { done = true; clearTimeout(killer); });
   });
 }
 
 // 浏览器任务队列：同步/查询/回写 串行
 let jobChain = Promise.resolve();
 const jobState = { running: false, type: "", startedAt: null, doneAt: null };
-function enqueue(fn, type) {
-  const JOB_TIMEOUT = 5 * 60 * 1000;  // 单个任务最长 5 分钟，防止卡死阻塞队列
+let tencentLoginProc = null;   // 腾讯文档登录进程（无头截图二维码回传），退出后置 null
+function enqueue(fn, type, timeoutMs = 5 * 60 * 1000) {  // 默认 5 分钟；长任务（批量检查/执行、回写批）传入更长超时
   jobChain = jobChain.then(async () => {
     jobState.running = true;
     jobState.type = type || "任务";
     jobState.startedAt = Date.now();
     jobState.doneAt = null;
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(type + " 超时（5分钟）")), JOB_TIMEOUT));
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(type + " 超时（" + Math.round(timeoutMs / 60000) + "分钟）")), timeoutMs));
     try { return await Promise.race([fn(), timeout]); }
     finally { jobState.running = false; jobState.doneAt = Date.now(); }
   }).catch(e => { console.log("[job] 出错: " + e.message); return { ok: false, reason: e.message }; });
@@ -140,7 +159,7 @@ function makeWbBatcher(extraArgs, typeName, opts = {}) {
         active = false;
         if (ids.size) run();   // 运行期间新勾选/新反馈 → 紧接着再起一批
       }
-    }, typeName);
+    }, typeName, WB_BATCH_TIMEOUT + 5 * 60 * 1000);
   };
   const mark = (id) => {
     ids.add(Number(id));
@@ -170,6 +189,8 @@ const server = http.createServer(async (req, res) => {
     } else if (p === "/api/status") {
       const sm = db.prepare("SELECT query_status, COUNT(*) n FROM complaints GROUP BY query_status").all();
       const map = {}; sm.forEach(x => map[x.query_status] = x.n);
+      let dingProgress = null;
+      try { dingProgress = JSON.parse(fs.readFileSync(path.join(dataDir, "ding_progress.json"), "utf8")); } catch {}
       json(res, 200, {
         running: jobState.running, type: jobState.type,
         startedAt: jobState.startedAt, doneAt: jobState.doneAt,
@@ -179,6 +200,7 @@ const server = http.createServer(async (req, res) => {
         pending: map.pending || 0, filled: map.filled || 0, not_found: map.not_found || 0, special: map.special || 0,
         dingSent: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='ok'").get().n,
         dingFail: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='fail'").get().n,
+        dingProgress,
       });
     } else if (p === "/api/stats") {
       const s = db.prepare(`SELECT query_status, COUNT(*) n FROM complaints GROUP BY query_status`).all();
@@ -230,6 +252,22 @@ const server = http.createServer(async (req, res) => {
       if (sheet) args.push("--sheet", sheet);
       json(res, 200, { ok: true, message: "查询已开始" });
       enqueue(async () => { await runScript("site-query.js", args); }, "查询补全");
+    } else if (p === "/api/query-one" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const data = JSON.parse(body || "{}");
+      const id = Number(data.id);
+      if (!id) return json(res, 400, { error: "缺少 id" });
+      json(res, 200, { ok: true, message: "补全已开始" });
+      enqueue(async () => { await runScript("site-query.js", ["--ids", String(id)]); }, "单条补全");
+    } else if (p === "/api/query-batch" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const data = JSON.parse(body || "{}");
+      const ids = (data.ids || []).map(Number).filter(n => n > 0);
+      if (!ids.length) return json(res, 400, { error: "缺少 ids" });
+      json(res, 200, { ok: true, message: "补全已开始" });
+      enqueue(async () => { await runScript("site-query.js", ["--ids", ids.join(",")]); }, "批量补全");
     } else if (p === "/api/process" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -284,7 +322,7 @@ const server = http.createServer(async (req, res) => {
       jobState.lastResult = null;
       jobState.lastPhase = phase;
       enqueue(async () => {
-        const rr = await runScript("writeback.js", ["--batch", "--sheet", sheet, "--phase", phase]);
+        const rr = await runScript("writeback.js", ["--batch", "--sheet", sheet, "--phase", phase], 15 * 60 * 1000);
         const out = String(rr.stdout || "");
         const m = out.split("\n").find(l => l.startsWith("__BATCH_JSON__"));
         let result;
@@ -299,7 +337,7 @@ const server = http.createServer(async (req, res) => {
           enqueue(async () => { await runScript("notify.js", ["--auto"]); }, "钉钉自动发送");
         }
         return result;
-      }, "批量回填" + (phase === "exec" ? "执行" : "检查"));
+      }, "批量回填" + (phase === "exec" ? "执行" : "检查"), 20 * 60 * 1000);
       json(res, 200, { ok: true, async: true, phase });
     } else if (p === "/api/talkgenall") {
       // 批量生成/撤销话术：GET 返回状态；POST {on:1/0} 批量设置（仅"有具体助教"的单）
@@ -340,18 +378,59 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { ok: true });
     } else if (p === "/api/ding/status") {
       const bin = await findDwsBin();
-      let available = !!bin, loggedIn = false;
+      let available = !!bin, loggedIn = false, userName = "";
       if (bin) {
         const r = await runDws(bin, ["auth", "status", "--format", "json"], 15000);
         const out = String(r.stdout || "") + String(r.stderr || "");
         loggedIn = !r.err && authLooksLoggedIn(out);
+        if (loggedIn) {
+          try { const j = JSON.parse(String(r.stdout || "")); userName = j.user_name || j.userName || ""; } catch {}
+        }
       }
       const s = readDingSettings();
       json(res, 200, {
         available,
         loggedIn,
+        userName,
         auto: (s.auto === undefined) ? (dingCfg.autoSendOnWriteback !== false) : !!s.auto,
       });
+    } else if (p === "/api/tencent/login" && req.method === "POST") {
+      // 无头后台打开登录框截图二维码，二维码回传到操作者浏览器，扫码后登录态落在终端 profile
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      let force = false;
+      try { force = !!(JSON.parse(body || "{}").force); } catch {}
+      // 已登录且非强制重登：秒回「已登录」，不启动浏览器（避免等 9 秒才提示）
+      if (!force && tencentLoggedIn()) {
+        try { fs.writeFileSync(path.join(dataDir, "qr_state.json"), JSON.stringify({ status: "done", message: "已登录", updatedAt: Date.now() }), "utf8"); } catch {}
+        try { fs.unlinkSync(path.join(dataDir, "qr.png")); } catch {}
+        return json(res, 200, { ok: true, message: "已登录" });
+      }
+      if (tencentLoginProc && tencentLoginProc.exitCode === null) {
+        if (!force) return json(res, 200, { ok: true, message: "腾讯文档登录进行中，请刷新二维码" });
+        try { tencentLoginProc.kill(); } catch {}
+        tencentLoginProc = null;
+      }
+      try { fs.unlinkSync(path.join(dataDir, "qr_state.json")); } catch {}
+      try { fs.unlinkSync(path.join(dataDir, "qr.png")); } catch {}
+      const args = [path.join(ROOT, "src", "login-qr.js")];
+      if (force) args.push("--force");
+      const child = spawn(process.execPath, args, {
+        cwd: ROOT, stdio: "ignore", windowsHide: true
+      });
+      child.on("exit", () => { tencentLoginProc = null; });
+      child.unref();
+      tencentLoginProc = child;
+      json(res, 200, { ok: true, message: force ? "正在退出登录并重新生成二维码…" : "正在生成登录二维码…" });
+    } else if (p === "/api/tencent/qrcode") {
+      const state = (() => { try { return JSON.parse(fs.readFileSync(path.join(dataDir, "qr_state.json"), "utf8")); } catch { return {}; } })();
+      let qr = "";
+      try { qr = fs.readFileSync(path.join(dataDir, "qr.png")).toString("base64"); } catch {}
+      json(res, 200, { state: state.status || "idle", message: state.message || "", qr: qr ? "data:image/png;base64," + qr : "" });
+    } else if (p === "/api/tencent/refresh-qr" && req.method === "POST") {
+      // 写刷新标志，login-qr.js 轮询到后重载页面重新生成二维码
+      try { fs.writeFileSync(path.join(dataDir, "qr_refresh.flag"), "1", "utf8"); } catch {}
+      json(res, 200, { ok: true, message: "正在刷新二维码…" });
     } else if (p === "/api/ding/login" && req.method === "POST") {
       const bin = await findDwsBin();
       if (!bin) return json(res, 200, { ok: false, message: "未检测到 dws，请先安装：npm install -g dingtalk-workspace-cli" });
@@ -455,6 +534,75 @@ const server = http.createServer(async (req, res) => {
       hr.on("error", (e) => json(res, 200, { ok: false, error: e.message }));
       hr.write(payload);
       hr.end();
+    } else if (p === "/api/channel-lib") {
+      if (req.method === "GET") {
+        const q = (u.searchParams.get("q") || "").trim();
+        const channel = (u.searchParams.get("channel") || "").trim();
+        let sql = "SELECT id, prod_name, prod_id, channel FROM channel_lib";
+        const params = [];
+        const conds = [];
+        if (q) { conds.push("(prod_name LIKE ? OR prod_id LIKE ?)"); params.push("%" + q + "%", "%" + q + "%"); }
+        if (channel) { conds.push("channel = ?"); params.push(channel); }
+        if (conds.length) sql += " WHERE " + conds.join(" AND ");
+        sql += " ORDER BY id DESC";
+        const rows = db.prepare(sql).all(...params);
+        const chRows = db.prepare("SELECT channel, COUNT(*) n FROM channel_lib GROUP BY channel ORDER BY n DESC").all();
+        json(res, 200, { ok: true, rows, channels: chRows });
+      } else if (req.method === "POST") {
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        const data = JSON.parse(body || "{}");
+        const prodName = String(data.prod_name || "").trim();
+        const prodId = String(data.prod_id || "").trim();
+        const channel = String(data.channel || "").trim();
+        if (!prodName || !prodId || !channel) return json(res, 400, { ok: false, error: "商品名称、商品ID、渠道 不能为空" });
+        const dup = db.prepare("SELECT id FROM channel_lib WHERE prod_id=? AND channel=?").get(prodId, channel);
+        if (dup) return json(res, 200, { ok: false, error: "该商品ID+渠道已存在" });
+        db.prepare("INSERT INTO channel_lib (prod_name, prod_id, channel) VALUES (?,?,?)").run(prodName, prodId, channel);
+        json(res, 200, { ok: true });
+      } else if (req.method === "DELETE") {
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        const data = JSON.parse(body || "{}");
+        const id = Number(data.id) || 0;
+        if (!id) return json(res, 400, { ok: false, error: "id is required" });
+        db.prepare("DELETE FROM channel_lib WHERE id=?").run(id);
+        json(res, 200, { ok: true });
+      } else {
+        json(res, 405, { error: "method not allowed" });
+      }
+    } else if (p === "/api/channel-match" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const data = JSON.parse(body || "{}");
+      const filePath = String(data.path || "").trim();
+      if (!filePath || !fs.existsSync(filePath)) return json(res, 400, { ok: false, error: "文件不存在" });
+      const pyScript = path.join(ROOT, "src", "channel_match.py");
+      execFile("python", [pyScript, filePath], { cwd: ROOT, timeout: 60000, windowsHide: true }, (err, stdout, stderr) => {
+        if (err) return json(res, 200, { ok: false, error: (stderr || err.message) });
+        try {
+          const result = JSON.parse(String(stdout || ""));
+          json(res, 200, result);
+        } catch (e) {
+          json(res, 200, { ok: false, error: "解析匹配结果失败" });
+        }
+      });
+    } else if (p === "/api/channel-lib-import" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const data = JSON.parse(body || "{}");
+      const filePath = String(data.path || "").trim();
+      if (!filePath || !fs.existsSync(filePath)) return json(res, 400, { ok: false, error: "文件不存在" });
+      const pyScript = path.join(ROOT, "src", "channel_import.py");
+      execFile("python", [pyScript, filePath], { cwd: ROOT, timeout: 180000, windowsHide: true }, (err, stdout, stderr) => {
+        if (err) return json(res, 200, { ok: false, error: (stderr || err.message) });
+        try {
+          const result = JSON.parse(String(stdout || ""));
+          json(res, 200, result);
+        } catch (e) {
+          json(res, 200, { ok: false, error: "解析导入结果失败" });
+        }
+      });
     } else {
       json(res, 404, { error: "not found" });
     }
