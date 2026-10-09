@@ -5,3 +5,7 @@ backup_*/
 .claude/
 *.log
 config.json
+__pycache__/
+*.pyc
+_test*.js
+_verify*
