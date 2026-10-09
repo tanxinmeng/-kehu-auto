@@ -73,6 +73,55 @@ function abcFromParts(parts) {
   return { A, B, C };
 }
 
+// 扁平单行块：源表 C 列内容是空格分隔的单行（非 Alt+Enter 换行）时，整行复制成一行
+// [A=日期, B?, C=订单+内容(空格分隔), D归类, ...]，订单号在中间列而非末列，isBlockStart 判不出来。
+// 只认"订单号不在末列"的行，避免把正常块起始 [A,B,C=订单号] 误判成扁平块。
+function flattenFromParts(parts) {
+  if (parts.length < 3) return null;
+  if (!dateRe.test(normDate(parts[0]))) return null;
+  const orderIdx = parts.findIndex((p, idx) => idx >= 1 && /\d{14,}/.test((p || "").trim()));
+  if (orderIdx < 1 || orderIdx >= parts.length - 1) return null;
+  return {
+    A: normDate(parts[0]),
+    B: (parts[1] || "").trim(),
+    C: (parts[orderIdx] || "").trim(),
+    // 与正常块结束行对齐：slice 后 [C, D, E, F, ...]，extractFields 按 ep[1]=D 起映射
+    endParts: parts.slice(orderIdx),
+  };
+}
+
+// 统一块构造：正常块（订单号在末列）走 abcFromParts；扁平单行块 endParts 直接就绪
+function beginRecord(parts, row) {
+  const fl = flattenFromParts(parts);
+  if (fl) {
+    return {
+      offset: row,
+      feedback_date: fl.A,
+      cust_no: fl.B,
+      order_no: extractOrder(fl.C),
+      startC: fl.C,
+      contC: [],
+      endParts: fl.endParts,
+      flattened: true,
+    };
+  }
+  const abc = abcFromParts(parts);
+  return {
+    offset: row,
+    feedback_date: normDate(abc.A),
+    cust_no: abc.B,
+    order_no: extractOrder(abc.C),
+    startC: abc.C,
+    contC: [],
+    endParts: null,
+  };
+}
+
+// 块起始判定（含扁平单行块）
+function isBlockStartAny(parts, rawLen = parts.length) {
+  return isBlockStart(parts, rawLen) || flattenFromParts(parts) !== null;
+}
+
 // 解析整份复制文本 → 记录数组（按源表从上到下顺序，每块含 offset 行号）
 export function parseCopy(text) {
   const lines = String(text || "").split(/\r?\n/);
@@ -95,19 +144,11 @@ export function parseCopy(text) {
     while (parts.length > 1 && (parts[0] || "").trim() === "") parts.shift();
     if (isTabOnlyLine(line)) { row++; continue; }       // 空行：占源表一行，不产生记录
     if (isResidueRow(parts)) { row++; continue; }        // 日期残留行：占一行，不产生记录、不入客户信息
-    if (isBlockStart(parts, rawLen)) {
+    if (isBlockStartAny(parts, rawLen)) {
       if (cur) records.push(cur);
-      const abc = abcFromParts(parts);
-      cur = {
-        offset: row,
-        feedback_date: normDate(abc.A),
-        cust_no: abc.B,
-        order_no: extractOrder(abc.C),
-        startC: abc.C,
-        contC: [],
-        endParts: null,
-      };
+      cur = beginRecord(parts, row);
       row++;
+      if (cur.endParts) continue;   // 扁平单行块：整行即完整记录，无续行
       // 消费续行/结束行/碎片（不占行号），直到下一个块起始
       i++;
       while (i < lines.length) {
@@ -117,7 +158,7 @@ export function parseCopy(text) {
         while (p2.length > 1 && (p2[0] || "").trim() === "") p2.shift();
         if (isTabOnlyLine(lines[i])) { i++; continue; }          // 块内空行：不结束块，继续
         if (isResidueRow(p2)) { i++; continue; }                 // 块内日期残留：忽略，继续
-        if (isBlockStart(p2, rawLen2)) { i--; break; }           // 下一个块起始
+        if (isBlockStartAny(p2, rawLen2)) { i--; break; }        // 下一个块起始（含扁平单行块）
         cur.contC.push((rawParts[0] || "").trim());
         // ?????? C(??)+D(??) ???????/???/??????????????
         // 结束行识别：C 列有内容且该行至少 2 列。不再要求第 2 列（问题归类 D）非空——
@@ -162,20 +203,16 @@ export function parseCopyWithBlanks(text) {
     while (parts.length > 1 && (parts[0] || "").trim() === "") parts.shift();
     if (isTabOnlyLine(line)) { rows.push({ kind: "blank", offset: row }); row++; continue; }
     if (isResidueRow(parts)) { rows.push({ kind: "residue", offset: row, feedback_date: normDate(parts[0]) }); row++; continue; }
-    if (isBlockStart(parts, rawLen)) {
+    if (isBlockStartAny(parts, rawLen)) {
       if (cur && !pushed) rows.push({ kind: "record", rec: cur });
-      const abc = abcFromParts(parts);
-      cur = {
-        offset: row,
-        feedback_date: normDate(abc.A),
-        cust_no: abc.B,
-        order_no: extractOrder(abc.C),
-        startC: abc.C,
-        contC: [],
-        endParts: null,
-      };
+      cur = beginRecord(parts, row);
       pushed = false;
       row++;
+      if (cur.endParts) {                                        // 扁平单行块：整行即完整记录
+        rows.push({ kind: "record", rec: cur });
+        pushed = true;
+        continue;
+      }
       i++;
       while (i < lines.length) {
         const rawParts = lines[i].split("\t");
@@ -197,7 +234,7 @@ export function parseCopyWithBlanks(text) {
           }
           i++; continue;
         }
-        if (isBlockStart(p2, rawLen2)) { i--; break; }           // 下一个块起始
+        if (isBlockStartAny(p2, rawLen2)) { i--; break; }        // 下一个块起始（含扁平单行块）
         cur.contC.push((rawParts[0] || "").trim());
         // 结束行识别：同 parseCopy（≥2 列且首列非日期；不要求问题归类 D 非空）
         if (!cur.endParts && p2.length >= 2 && !dateRe.test(normDate(p2[0] || ""))) {

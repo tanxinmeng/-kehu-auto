@@ -36,9 +36,32 @@ export async function launch() {
   return { ctx, page };
 }
 
+// 游客只读模式检测：掉登录后文档可读但复制/写入都被静默限制
+export async function isGuestMode(page) {
+  return await page.evaluate(() => /(^|\s)skeleton-guest-mode(\s|$)/.test(document.body.className || "")).catch(() => false);
+}
+
 export async function openDoc(page, waitMs = 20000) {
   await page.goto(config.sites.tencentDoc.url, { waitUntil: "domcontentloaded", timeout: 90000 });
-  await page.waitForTimeout(waitMs);
+  // 等名称框出现即可开始探测（固定等 20s 纯浪费）
+  try { await page.waitForSelector("input.bar-label", { timeout: waitMs }); } catch {}
+  // 游客只读模式偶发（同 profile 上一分钟游客下一分钟正常）：会话有效但个别页面加载以游客骨架渲染，
+  // 复制/写入全被禁。检测到即 reload 自愈，最多 3 次。
+  let guest = await isGuestMode(page);
+  for (let i = 0; guest && i < 3; i++) {
+    log("openDoc: 检测到游客只读模式，reload 自愈（第" + (i + 1) + "次）...");
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 90000 }).catch(() => {});
+    try { await page.waitForSelector("input.bar-label", { timeout: waitMs }); } catch {}
+    await page.waitForTimeout(1500);
+    guest = await isGuestMode(page);
+  }
+  // 实测登录态落盘：session.json 的 cookie 快照无法反映页面实际加载态，
+  // server 的登录状态判定以此文件为准（3 小时内的实测结果优先于 cookie 检查）
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "doc_session.json"), JSON.stringify({ guest, at: Date.now() }), "utf8");
+  } catch {}
+  if (guest) log("openDoc: [警告] reload 3 次后仍为游客只读模式，复制/写入会受限——请运行 start-login.bat 重新扫码");
   // 等待表格渲染完成：导航到 C3 单元格读值，确认能读到数据
   for (let attempt = 0; attempt < 15; attempt++) {
     try {
@@ -46,11 +69,7 @@ export async function openDoc(page, waitMs = 20000) {
       await bar.click();
       await bar.fill("C3");
       await page.keyboard.press("Enter");
-      await page.waitForTimeout(3000);
-      const text = await page.evaluate(() => {
-        const el = document.querySelector("div.formula-input");
-        return el ? String(el.innerText || el.value || "").trim() : "";
-      });
+      const text = await pollFormulaText(page, 3000);
       if (text && text.length >= 1) { log("openDoc: 表格就绪，C3=" + JSON.stringify(text)); return; }
     } catch (e) { /* retry */ }
     log("openDoc: 第" + (attempt + 1) + "次探测表格未就绪，等待...");
@@ -59,33 +78,65 @@ export async function openDoc(page, waitMs = 20000) {
   log("openDoc: 警告：多次探测表格未就绪，继续尝试");
 }
 
+// 轮询读公式栏文本：非空即返回（最多 maxMs），空则等满
+async function pollFormulaText(page, maxMs) {
+  const deadline = Date.now() + maxMs;
+  while (true) {
+    const text = await page.evaluate(() => {
+      const fb = document.querySelector("div.formula-input");
+      return fb ? String(fb.innerText || fb.value || "").trim() : "";
+    });
+    if (text) return text;
+    if (Date.now() >= deadline) return "";
+    await page.waitForTimeout(300);
+  }
+}
+
 const TAB_PARAM = { AI: "ee5hin", "高": "87qj1u" };
 
 export async function isTabActive(page, ariaLabel) {
-  return await page.evaluate((label) => {
+  // 游客模式（掉登录）下底部 tab 不渲染成 [role=tab]，改用 URL 的 tab 参数兜底判断
+  return await page.evaluate(({ label, params }) => {
     const el = Array.from(document.querySelectorAll('[role="tab"]')).find(e => e.getAttribute("aria-label") === label);
-    return el ? el.getAttribute("aria-selected") === "true" : false;
-  }, ariaLabel);
+    if (el) return el.getAttribute("aria-selected") === "true";
+    const byParam = params[label];
+    return byParam ? location.href.includes("tab=" + byParam) : false;
+  }, { label: ariaLabel, params: TAB_PARAM });
 }
 
 export async function clickTab(page, sheetName) {
   const ariaLabel = sheetName === "AI" ? "AI" : "高";
   const tabParam = TAB_PARAM[sheetName];
   if (await isTabActive(page, ariaLabel)) return true;
+  // 首选 URL 直跳：当前版本文档底部标签栏不渲染 [role=tab] 元素（guest/登录态实测都为空），
+  // DOM 点击方式已失效，改 URL 的 tab 参数切换最可靠
+  if (tabParam) {
+    try {
+      const u = new URL(page.url());
+      u.searchParams.set("tab", tabParam);
+      await page.goto(u.toString(), { waitUntil: "domcontentloaded", timeout: 60000 });
+      try { await page.waitForSelector("input.bar-label", { timeout: 20000 }); } catch {}
+      const dl = Date.now() + 15000;
+      while (Date.now() < dl) {
+        if (await isTabActive(page, ariaLabel)) return true;
+        await page.waitForTimeout(500);
+      }
+    } catch (e) { log("clickTab: URL 切换 " + sheetName + " 异常(" + String(e.message || e).slice(0, 80) + ")，回退点击"); }
+  }
+  // 兜底：点击 tab 元素（未来版本若恢复渲染可用）
   for (let attempt = 1; attempt <= 3; attempt++) {
     const tab = page.locator(`[role="tab"][aria-label="${ariaLabel}"]`).first();
     if (await tab.count() > 0) await tab.click();
     else {
       const tab2 = page.locator('[role="tab"]', { hasText: ariaLabel }).first();
-      if (await tab2.count() === 0) return false;
+      if (await tab2.count() === 0) break;
       await tab2.click();
     }
-    if (tabParam) {
-      try { await page.waitForFunction((tp) => location.href.includes("tab=" + tp), tabParam, { timeout: 15000 }); } catch {}
+    const dl = Date.now() + 6000;
+    while (Date.now() < dl) {
+      if (await isTabActive(page, ariaLabel)) return true;
+      await page.waitForTimeout(500);
     }
-    await page.waitForTimeout(4000);
-    if (await isTabActive(page, ariaLabel)) return true;
-    await page.waitForTimeout(2000);
   }
   log("clickTab 切换 " + sheetName + " 可能未成功，继续尝试...");
   return await isTabActive(page, ariaLabel);
@@ -130,14 +181,15 @@ export async function readCell(page, ref) {
   await bar.click();
   await bar.fill(ref);
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(4000);
-  let text = await page.evaluate(() => {
-    const fb = document.querySelector("div.formula-input");
-    if (fb) { const t = (fb.innerText || "").trim(); if (t) return t; }
-    return "";
-  });
+  // 关键：先等名称框显示目标格（导航确认完成），否则可能读到上一个单元格的残留值——
+  // 连续行同值（如期次都是 0911）时会假通过，读到旧空值会假失败
+  await page.waitForFunction((r) => {
+    const el = document.querySelector("input.bar-label");
+    return el && String(el.value || "").trim().toUpperCase() === String(r).toUpperCase();
+  }, String(ref), { timeout: 5000 }).catch(() => {});
+  let text = await pollFormulaText(page, 3000);
   if (!text) {
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(1500);
     text = await page.evaluate(() => {
       const fb = document.querySelector("div.formula-input");
       if (fb) { const t = (fb.innerText || "").trim(); if (t) return t; }
@@ -152,10 +204,13 @@ export async function readCell(page, ref) {
   return text || "";
 }
 
-// 从指定起始行向下复制：A<startRow> → 点击A列聚焦网格 → 方向键微调到目标行 → Ctrl+Shift+Down/Right 扩展 → Ctrl+C
-// 实测：全选复制(Ctrl+A)在部分环境失效（点击落到浮层/焦点丢失），此法可靠；仅复制"起始行以下"，正合使用场景
+// 从指定起始行向下复制，双策略交替重试：
+//   策略A（无漂移）：点击网格 → 名称框导航 A<startRow> → 方向键轻推回网格焦点 → 校验名称框 → 扩展复制
+//   策略B（传统）：名称框导航 → 点击网格 → 方向键微调回目标行 → 扩展复制
+// 为什么两条都要：A 避免点击漂移但导航后焦点可能不落回网格；B 焦点可靠但 click(400,320)
+// 会把选区点到别的格子（实测落 C1531/C1433）。游客只读模式下复制本身受限，两种都会失败并留下诊断日志。
 export async function copyFromRow(page, sheetName, startRow, expectedOrder, opts = {}) {
-  const { x = 75, y = 350, maxAdjust = 25, retries = 4 } = opts;
+  const { x = 75, y = 350, retries = 4 } = opts;
   const readNamebox = () => page.evaluate(() => {
     const el = document.querySelector("input.bar-label");
     return el ? String(el.value || "") : "";
@@ -171,45 +226,104 @@ export async function copyFromRow(page, sheetName, startRow, expectedOrder, opts
       return t;
     });
   };
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    // 1) 名称框定位 A<startRow>
-    await page.evaluate((r) => { const el = document.querySelector("input.bar-label"); if (el) { el.focus(); el.select(); } }, "A" + startRow);
-    await page.keyboard.type("A" + startRow, { delay: 15 });
+  // 仍从 A 列锚定（用户要求复制必须含 A 日期/B 客服列）；A、B 允许为空，
+  // A 为空时 Ctrl+Shift+Down 只跳到下一个非空格，选区会散（1609 行事故）——扩展逻辑见 extendAndCopy
+  const target = "A" + startRow;
+  // 名称框接受目标格或其下一行：高表开头有合并单元格（A3:A4 合并时导航 A3 名称框显示 A4），
+  // 内容对齐由锚点订单校验兜底（sync 侧 findAnchor 按内容定位，错行会导致锚点匹配失败而中止）
+  const acceptedRef = (v) => {
+    const m = String(v || "").trim().match(/^([A-Z]+)(\d+)$/i);
+    if (!m) return false;
+    const row = Number(m[2]);
+    return m[1].toUpperCase() === "A" && (row === startRow || row === startRow + 1);
+  };
+  const navToTarget = async () => {
+    await page.evaluate((r) => { const el = document.querySelector("input.bar-label"); if (el) { el.focus(); el.select(); } }, target);
+    await page.keyboard.type(target, { delay: 15 });
     await page.keyboard.press("Enter");
-    await page.waitForTimeout(1800);
-    // 2) 点击 A 列区域，让网格进入可选状态（实测必须先点击，选区快捷键才生效）
-    await page.mouse.click(x, y);
-    await page.waitForTimeout(1000);
-    let cell = await readNamebox();
-    let m = String(cell).match(/^([A-Z]+)(\d+)$/);
-    if (!m) { log("copyFromRow: 点击后活动单元格无法解析 " + JSON.stringify(cell) + "，重试"); continue; }
-    let col = m[1], row = Number(m[2]);
-    // 3) 列不是 A → Home 跳到 A 列
-    if (col !== "A") {
-      await page.keyboard.press("Home");
-      await page.waitForTimeout(600);
-      cell = await readNamebox();
-      m = String(cell).match(/^([A-Z]+)(\d+)$/);
-      if (m) { col = m[1]; row = Number(m[2]); }
-    }
-    // 4) 行微调到 startRow
-    let guard = 0;
-    while (row < startRow && guard < maxAdjust) { await page.keyboard.press("ArrowDown"); await page.waitForTimeout(120); row++; guard++; }
-    while (row > startRow && guard < maxAdjust) { await page.keyboard.press("ArrowUp"); await page.waitForTimeout(120); row--; guard++; }
-    // 5) 扩展选区：向下到数据末尾（遇空行会停在第1个空行前），再向右含全部列
+    return await page.waitForFunction((r) => {
+      const el = document.querySelector("input.bar-label");
+      if (!el) return false;
+      const v = String(el.value || "").trim().toUpperCase();
+      const m = v.match(/^A(\d+)$/);
+      // 接受目标行或其下一行（合并单元格显示锚定行）
+      return m && (Number(m[1]) === startRow || Number(m[1]) === startRow + 1);
+    }, target, { timeout: 4000 }).then(() => true).catch(() => false);
+  };
+  const extendAndCopy = async () => {
+    // A{startRow} 为空时（新行未填日期），Ctrl+Shift+Down 第一按只扩到锚点上方连续区的末尾，
+    // 第二按才跨过空档把锚点行和表底带上（2026-09-16 1609 行事故实测）。
+    // 非空时多按会越过表底选到整列空行，绝不能多按。Right 最多 3 按：一按到数据右缘，
+    // D 列为空时需再按跨档；网格封顶在已用列宽，多按只追加空列，无害。
     await page.keyboard.press("Control+Shift+ArrowDown");
     await page.waitForTimeout(2200);
-    await page.keyboard.press("Control+Shift+ArrowRight");
-    await page.waitForTimeout(2200);
-    // 6) 复制并校验
+    if (opts.emptyA) {
+      await page.keyboard.press("Control+Shift+ArrowDown");
+      await page.waitForTimeout(2200);
+    }
+    for (let k = 0; k < 3; k++) {
+      await page.keyboard.press("Control+Shift+ArrowRight");
+      await page.waitForTimeout(1200);
+    }
     try { await page.evaluate(() => navigator.clipboard.writeText("")); } catch {}
     await page.waitForTimeout(300);
     await page.keyboard.press("Control+c");
     await page.waitForTimeout(3000);
-    const text = await readClipboard();
-    const ok = text && text.length > 100 && (!expectedOrder || text.includes(String(expectedOrder)));
+    return await readClipboard();
+  };
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const useNew = attempt % 2 === 1;   // 奇数次用策略A，偶数次用策略B
+    let before = "";
+    if (useNew) {
+      // 策略A：先点击网格（此后绝不能再点击），名称框导航，方向键轻推把焦点落回网格
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(800);
+      if (!await navToTarget()) { log("copyFromRow: 第" + attempt + "次(A)名称框导航未确认（当前=" + JSON.stringify(await readNamebox()) + "），重试"); continue; }
+      await page.keyboard.press("ArrowDown");
+      await page.waitForTimeout(300);
+      await page.keyboard.press("ArrowUp");
+      await page.waitForTimeout(300);
+    } else {
+      // 策略B：导航 → 点击网格 → 方向键微调回目标行（click 落点可能漂移，靠名称框读数校正）
+      await page.evaluate((r) => { const el = document.querySelector("input.bar-label"); if (el) { el.focus(); el.select(); } }, target);
+      await page.keyboard.type(target, { delay: 15 });
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(1800);
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(1000);
+      let cell = await readNamebox();
+      let m = String(cell).match(/^([A-Z]+)(\d+)$/);
+      if (!m) { log("copyFromRow: 第" + attempt + "次(B)点击后活动单元格无法解析 " + JSON.stringify(cell) + "，重试"); continue; }
+      let col = m[1], row = Number(m[2]);
+      if (col !== "A") {
+        await page.keyboard.press("Home");
+        await page.waitForTimeout(600);
+        cell = await readNamebox();
+        m = String(cell).match(/^([A-Z]+)(\d+)$/);
+        if (m) { col = m[1]; row = Number(m[2]); }
+      }
+      let guard = 0;
+      while (row < startRow && guard < 25) { await page.keyboard.press("ArrowDown"); await page.waitForTimeout(120); row++; guard++; }
+      while (row > startRow && guard < 25) { await page.keyboard.press("ArrowUp"); await page.waitForTimeout(120); row--; guard++; }
+      await page.waitForTimeout(400);
+    }
+    // 复制前校验选区位置：名称框必须显示目标格（或合并单元格的下一行），否则绝不复制
+    before = await readNamebox();
+    if (!acceptedRef(before)) {
+      log("copyFromRow: 第" + attempt + "次(" + (useNew ? "A" : "B") + ")选区漂移（复制前名称框=" + JSON.stringify(before) + "，目标 " + target + "），重试");
+      continue;
+    }
+    const text = await extendAndCopy();
+    // 锚点订单在复制结果里 = 选区确实从起始行开始，长度不再设下限——表尾只剩一两行时
+    // 合法复制可能不足 100 字符（2026-10-01 行3278 表尾 84 字符被误判重试死循环）
+    const ok = expectedOrder
+      ? text && text.includes(String(expectedOrder))
+      : text && text.length > 100;
     if (ok) return text;
-    log("copyFromRow: " + sheetName + " 第" + attempt + "次结果异常（" + (text ? text.length : 0) + " 字符）" + (expectedOrder ? "，缺锚点订单" : "") + "，重试");
+    log("copyFromRow: " + sheetName + " 第" + attempt + "次(" + (useNew ? "A" : "B") + ")结果异常（" + (text ? text.length : 0) + " 字符）" + (expectedOrder ? "，缺锚点订单" : "") + "，复制前名称框=" + JSON.stringify(before) + "，内容前200字: " + JSON.stringify(String(text || "").slice(0, 200)) + "，重试");
+    if (await page.evaluate(() => /(^|\s)skeleton-guest-mode(\s|$)/.test(document.body.className || ""))) {
+      log("copyFromRow: [警告] 文档处于游客只读模式（掉登录），复制很可能被禁——请运行 start-login.bat 重新扫码后再同步");
+    }
     await page.waitForTimeout(1500);
   }
   throw new Error("从第 " + startRow + " 行向下复制失败（" + sheetName + "）");
@@ -219,5 +333,10 @@ export async function gotoCell(page, ref) {
   await page.evaluate((r) => { const el = document.querySelector("input.bar-label"); if (el) { el.focus(); el.select(); } }, ref);
   await page.keyboard.type(ref, { delay: 15 });
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(2200);
+  // 名称框显示目标格 = 导航提交完成，即刻返回（原固定 2.2s 纯等）
+  const ok = await page.waitForFunction((r) => {
+    const el = document.querySelector("input.bar-label");
+    return el && String(el.value || "").trim().toUpperCase() === String(r).toUpperCase();
+  }, String(ref), { timeout: 2500 }).then(() => true).catch(() => false);
+  if (!ok) await page.waitForTimeout(1500);   // 未确认到位时兜底等一会
 }

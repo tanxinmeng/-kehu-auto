@@ -170,22 +170,30 @@ async function findRow(page, target, candidates, range = 6) {
 }
 
 // ---------- 写入与校验 ----------
+// 掉登录时文档以游客只读模式打开：读正常、所有写入通道静默失效（公式栏不可编辑/打字无响应/粘贴落空），
+// 必须在写之前检测，否则只报"写后校验失败"无从排查（2026/9/13 实测）
+async function assertDocWritable(page) {
+  const guest = await page.evaluate(() => /(^|\s)skeleton-guest-mode(\s|$)/.test(document.body.className || ""));
+  if (guest) throw new Error("腾讯文档已掉登录（游客只读模式），请运行 start-login.bat 重新扫码后再回填");
+}
+
 async function writeCell(page, ref, value) {
   await gotoCell(page, ref);
   // 腾讯文档：活动单元格用公式栏(div.formula-input)编辑最稳（实测 F2/直接输入/双击均不提交）
+  // 等待全部压缩为轮询制：提交是否成功由紧跟的 verifyCell 轮询校验兜底
   const hasFormula = await page.evaluate(() => !!document.querySelector("div.formula-input"));
   if (hasFormula) {
     await page.evaluate(() => { const el = document.querySelector("div.formula-input"); if (el) el.focus(); });
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(200);
   } else {
     await page.keyboard.press("F2");   // 兜底：老机制
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(500);
   }
   await page.keyboard.press("Control+a");
-  await page.keyboard.type(String(value), { delay: 10 });
-  await page.waitForTimeout(300);
+  await page.keyboard.type(String(value), { delay: 5 });
+  await page.waitForTimeout(150);
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(1800);
+  await page.waitForTimeout(500);
 }
 async function verifyCell(page, ref, expected) {
   const got = await readCell(page, ref);
@@ -195,23 +203,6 @@ async function verifyCell(page, ref, expected) {
 
 // ---------- 批量回填辅助（新） ----------
 function normCell(v) { return String(v == null ? "" : v).replace(/\s+/g, ""); }
-async function setClipboard(page, text) {
-  return await page.evaluate((t) => new Promise((resolve) => {
-    const fallback = () => {
-      try {
-        const ta = document.createElement("textarea");
-        ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
-        document.body.appendChild(ta); ta.focus(); ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-        resolve(true);
-      } catch (e) { resolve(false); }
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(t).then(() => resolve(true)).catch(fallback);
-    } else fallback();
-  }), text);
-}
 // 名称框定位 → 点网格聚焦 → 用方向键微调回目标单元格（实测点击会移动选区，方向键可校正）
 async function gotoCellAndFocus(page, ref) {
   const m = String(ref).match(/^([A-Z]+)(\d+)$/);
@@ -232,14 +223,6 @@ async function gotoCellAndFocus(page, ref) {
   if (dRow < 0) await press(dRow, "ArrowUp"); else if (dRow > 0) await press(dRow, "ArrowDown");
   await page.waitForTimeout(600);
 }
-// 一次性粘贴多行×3列文本块到 ref（TSV：行内 \t、行间 \n）
-async function pasteBlock(page, ref, blockText) {
-  const ok = await setClipboard(page, blockText);
-  if (!ok) throw new Error("写入剪贴板失败，无法粘贴");
-  await gotoCellAndFocus(page, ref);
-  await page.keyboard.press("Control+v");
-  await page.waitForTimeout(3500);
-}
 function batchWebMap(sheet) {
   const map = {};
   for (const r of db.prepare("SELECT src_row, order_no, fill_period, fill_phone, fill_tutor, src_period, src_phone, src_tutor, is_blank FROM complaints WHERE sheet=? ORDER BY src_row").all(sheet)) {
@@ -257,7 +240,8 @@ async function batchCheck() {
   // 多采样点逐格校验：用 readCell 直接导航到 C 列（避免 copyFromRow 的行号映射偏差）
   const recs = db.prepare("SELECT src_row, order_no FROM complaints WHERE sheet=? AND is_blank=0 AND src_row IS NOT NULL AND order_no != '' ORDER BY src_row").all(batchSheet);
   if (!recs.length) { console.log("__BATCH_JSON__" + JSON.stringify({ ok:false, phase:"check", reason:"该表没有已同步的有效记录" })); db.close(); return; }
-  db.prepare("UPDATE complaints SET mismatch=0, writeback_msg=NULL WHERE sheet=?").run(batchSheet);
+  // 只清 mismatch，不清 writeback_msg：清掉 msg 会抹掉上次失败的诊断原因（只显示"失败"无从排查）
+  db.prepare("UPDATE complaints SET mismatch=0 WHERE sheet=?").run(batchSheet);
   const top = recs[0].src_row;
   const bottom = recs[recs.length - 1].src_row;
   const middle = recs[Math.floor((recs.length - 1) / 2)].src_row;
@@ -274,8 +258,9 @@ async function batchCheck() {
     await openDoc(page);
     const barOk = await page.locator("input.bar-label").count();
     if (!barOk) throw new Error("腾讯文档未就绪（可能登录过期，请运行 start-login.bat 重新扫码）");
+    await assertDocWritable(page);
     await clickTab(page, batchSheet);
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(2500);
     for (const r of sampleList) {
       let srcOrder = "";
       for (let retry = 0; retry < 3; retry++) {
@@ -314,11 +299,12 @@ async function batchExec() {
   const web = batchWebMap(batchSheet);
   const samples = [top, middle, bottom];
   const { ctx, page } = await launch();
-  let written = 0, rolledBack = false, reason = "";
+  let written = 0, rolledBack = false, reason = "", ok = false;
   try {
     await openDoc(page);
     const barOk = await page.locator("input.bar-label").count();
     if (!barOk) throw new Error("腾讯文档未就绪（可能登录过期，请运行 start-login.bat 重新扫码）");
+    await assertDocWritable(page);
     await clickTab(page, batchSheet);
     // 预校验：顶/中/底 行号+订单号
     for (const r of samples) {
@@ -329,18 +315,29 @@ async function batchExec() {
     }
     log("批量预校验通过：顶" + top + " / 中" + middle + " / 底" + bottom + " 行号与订单一致");
     const v = (s) => String(s == null ? "" : s).replace(/[\r\n]+/g, " ");
-    const lines = [];
-    for (let r = top; r <= bottom; r++) {
+    // 剪贴板批量粘贴在腾讯文档上不可靠（2026/9/10 起静默失效：整块只落首格甚至整块丢失），
+    // 改用逐格写入（writeCell 公式栏通道）+ 逐格校验，失败精确定位到单元格
+    log("开始逐格写入 E/F/G（共 " + (bottom - top + 1) + " 行 × 3 列）...");
+    let writeErr = "";
+    for (let r = top; r <= bottom && !writeErr; r++) {
       const w = web[r] || {};
-      lines.push([v(w.period), v(w.phone), v(w.tutor)].join("\t"));
+      const vals = [["E", v(w.period)], ["F", v(w.phone)], ["G", v(w.tutor)]];
+      for (const [col, val] of vals) {
+        let done = false;
+        for (let attempt = 0; attempt < 2 && !done; attempt++) {
+          await writeCell(page, col + r, val);
+          done = await verifyCell(page, col + r, val);
+          if (!done && attempt === 0) log(col + r + " 写后校验未过，重写一次");
+        }
+        if (!done) { writeErr = col + r + " 写后校验失败（期望[" + val + "]）"; break; }
+      }
+      if (!writeErr) log("[写入] 行" + r + " E/F/G 完成");
     }
-    const block = lines.join("\n").replace(/\n+$/, "");
-    await pasteBlock(page, "E" + top, block);
-    log("已粘贴 " + (bottom - top + 1) + " 行 × E/F/G 到第 " + top + " 行起");
-	    // 等待腾讯文档完成渲染（大批量粘贴可能耗时较长）
-	    await page.waitForTimeout(5000);
-	    // 轻量探测：读一次单元格确认页面响应正常
-	    try { await readCell(page, "E" + top); } catch (e) { await page.waitForTimeout(3000); }
+    if (writeErr) {
+      db.prepare(`UPDATE complaints SET writeback_status='fail', writeback_msg=?, writeback_at=? WHERE sheet=? AND src_row BETWEEN ? AND ?`)
+        .run("批量回填失败：" + writeErr + "（已写入部分保留）", nowStr(), batchSheet, top, bottom);
+      log("批量回填中止：" + writeErr + "（已写入部分保留，请人工核查后重跑）");
+    }
 
 	    // 读单元格（带重试，避免页面瞬时卡顿导致误判失败）
 	    const readRetry = async (ref, retries = 3) => {
@@ -353,37 +350,32 @@ async function batchExec() {
 	    };
 
 	    // 末尾校验：顶/中/底 行号+订单号 + 期次/电话/助教 三格一致
-	    let ok = true;
-	    try {
-	      for (const r of samples) {
-	        const cTxt = await readRetry("C" + r);
-	        const srcOrder = extractOrder(cTxt);
-	        const w = web[r] || {};
-	        if (srcOrder !== (w.order || "")) { ok = false; reason = "粘贴后订单对不上（第" + r + "行：源表=" + srcOrder + " 网页=" + (w.order || "") + "）"; break; }
-	        const e = normCell(await readRetry("E" + r));
-	        const f = normCell(await readRetry("F" + r));
-	        const g = normCell(await readRetry("G" + r));
-	        const we = normCell(w.period), wf = normCell(w.phone), wg = normCell(w.tutor);
-	        if (e !== we || f !== wf || g !== wg) { ok = false; reason = "粘贴后数值对不上（第" + r + "行：期次[" + e + "]vs[" + we + "] 电话[" + f + "]vs[" + wf + "] 助教[" + g + "]vs[" + wg + "]）"; break; }
-	        log("[校验] 行" + r + " 通过");
+	    // 数值不齐不立即判失败：多行粘贴渲染可能滞后，先等 10s 复核（最多 3 轮），仍不齐才算失败
+	    const checkSample = async (r) => {
+	      const cTxt = await readRetry("C" + r);
+	      const srcOrder = extractOrder(cTxt);
+	      const w = web[r] || {};
+	      if (srcOrder !== (w.order || "")) return "粘贴后订单对不上（第" + r + "行：源表=" + srcOrder + " 网页=" + (w.order || "") + "）";
+	      const e = normCell(await readRetry("E" + r));
+	      const f = normCell(await readRetry("F" + r));
+	      const g = normCell(await readRetry("G" + r));
+	      if (e !== normCell(w.period) || f !== normCell(w.phone) || g !== normCell(w.tutor))
+	        return "粘贴后数值对不上（第" + r + "行：期次[" + e + "]vs[" + normCell(w.period) + "] 电话[" + f + "]vs[" + normCell(w.phone) + "] 助教[" + g + "]vs[" + normCell(w.tutor) + "]）";
+	      return "";
+	    };
+	    // 复用外层 reason（292 行声明）：这里若再 let 会遮蔽，导致最终 __BATCH_JSON__ 永远 ok:true
+	    ok = !writeErr;
+	    reason = writeErr || "";
+	    if (!writeErr) for (const r of samples) {
+	      let msg = "";
+	      for (let round = 0; round < 3; round++) {
+	        try { msg = await checkSample(r); }
+	        catch (e) { msg = "读取异常（第" + r + "行）: " + String(e.message || e).split("\n")[0]; }
+	        if (!msg) break;
+	        if (round < 2) { log("行" + r + " 校验未过（" + msg + "），等 10s 后复核第" + (round + 2) + "轮"); await page.waitForTimeout(10000); }
 	      }
-	    } catch (readErr) {
-	      // 读取异常不直接当失败——再次等待后重试一轮
-	      log("首轮校验异常：" + String(readErr.message || readErr).split("\n")[0] + "，等待后重试...");
-	      await page.waitForTimeout(5000);
-	      ok = true; reason = "";
-	      for (const r of samples) {
-	        try {
-	          const cTxt = await readCell(page, "C" + r);
-	          const srcOrder = extractOrder(cTxt);
-	          const w = web[r] || {};
-	          if (srcOrder !== (w.order || "")) { ok = false; reason = "粘贴后订单对不上（第" + r + "行）"; break; }
-	          const e = normCell(await readCell(page, "E" + r));
-	          const f = normCell(await readCell(page, "F" + r));
-	          const g = normCell(await readCell(page, "G" + r));
-	          if (e !== normCell(w.period) || f !== normCell(w.phone) || g !== normCell(w.tutor)) { ok = false; reason = "粘贴后数值对不上（第" + r + "行）"; break; }
-	        } catch (e2) { ok = false; reason = "读取异常（第" + r + "行）: " + String(e2.message||e2).split("\n")[0]; break; }
-	      }
+	      if (msg) { ok = false; reason = msg; break; }
+	      log("[校验] 行" + r + " 通过");
 	    }
 
 	    if (ok) {
@@ -399,8 +391,9 @@ async function batchExec() {
 	        AND fill_period<>'系统未掉落' AND fill_tutor NOT LIKE '%爱芯过滤%' AND fill_tutor NOT LIKE '%正价课拦截%'`)
 	        .run(now, batchSheet, top, bottom);
 	      log("批量回填成功：记录 " + N + " 条，顶/中/底校验通过");
-	    } else {
-	      // 回滚：撤销粘贴（Ctrl+Z），并验证顶行 E 已不再等于网页值
+	    } else if (!writeErr) {
+	      // 回滚：先把焦点放回网格（校验读取后焦点可能留在名称框，Ctrl+Z 会落空），再撤销粘贴
+	      await gotoCellAndFocus(page, "E" + top).catch(() => {});
 	      await page.keyboard.press("Control+z");
 	      await page.waitForTimeout(3000);
 	      try {
@@ -444,7 +437,9 @@ if (ID) {
 } else if (FEEDBACK_MODE) {
   targets = db.prepare("SELECT * FROM complaints WHERE feedback_text IS NOT NULL AND feedback_text != ''").all();
 } else {
-  targets = db.prepare("SELECT * FROM complaints WHERE processed='是'").all();
+  // 未定案的查询单（pending/query_fail/nf_wait 复核中）绝不回写源表：
+  // nf_wait 可能残留上一轮 not_found 的 fill_period="系统未掉落"，复核后若查到了源表就被写错。
+  targets = db.prepare("SELECT * FROM complaints WHERE processed='是' AND (query_status IS NULL OR query_status NOT IN ('pending','query_fail','nf_wait'))").all();
 }
 log(`待回写 ${targets.length} 条（dry-run=${DRY_RUN}, confirm=${CONFIRM}, feedback=${FEEDBACK_MODE}, locate-only=${LOCATE_ONLY}）`);
 if (!targets.length) { db.close(); process.exit(0); }
@@ -497,6 +492,7 @@ try {
   await openDoc(page);
   const barOk = await page.locator("input.bar-label").count();
   if (!barOk) throw new Error("腾讯文档未就绪（可能登录过期，请运行 start-login.bat 重新扫码）");
+  await assertDocWritable(page);
 
   for (const t of targets) {
     const sheet = t.sheet;
@@ -525,13 +521,16 @@ try {
             written.push(col);
             log(`[${t.id}] ${sheet}行${found.row}${col} 已写入顾问反馈`);
           }
-                } else {
-          // 单行快速回填：行号+订单号已由 findRow 校验 → 期次/电话/助教 一次粘贴（不再逐格校验）
+        } else {
+          // 单行回填：行号+订单号已由 findRow 校验 → E/F/G 逐格写入并校验（剪贴板粘贴在腾讯文档上不可靠）
           const v = (s) => String(s == null ? "" : s).replace(/[\r\n]+/g, " ");
-          const block = [v(t.fill_period || t.src_period), v(t.fill_phone || t.src_phone), v(t.fill_tutor || t.src_tutor)].join("\t");
-          await pasteBlock(page, "E" + found.row, block);
+          const vals = [["E", v(t.fill_period || t.src_period)], ["F", v(t.fill_phone || t.src_phone)], ["G", v(t.fill_tutor || t.src_tutor)]];
+          for (const [col, val] of vals) {
+            await writeCell(page, col + found.row, val);
+            if (!await verifyCell(page, col + found.row, val)) throw new Error("写后校验失败 " + col + found.row);
+          }
           written.push("E/F/G");
-          log(`[${t.id}] ${sheet}行${found.row} E/F/G 已一次性写入`);
+          log(`[${t.id}] ${sheet}行${found.row} E/F/G 已逐格写入并校验`);
         }
         updStatus.run("ok", `${sheet}行${found.row} ${written.join("/")} 已写入`, nowStr(), t.id);
         // 未掉落/过滤：无需钉钉，直接标记已处理

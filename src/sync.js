@@ -11,7 +11,7 @@ import fs from "node:fs";
 import config from "../config.json" with { type: "json" };
 import { openDb, upsertComplaint, upsertBlankRow } from "./db.js";
 import { parseCopyWithBlanks, extractFields, extractOrder } from "./blocks.js";
-import { log, launch, openDoc, clickTab, copyFromRow, readCell } from "./browser.js";
+import { log, launch, openDoc, clickTab, copyFromRow, readCell, isGuestMode } from "./browser.js";
 
 const ROOT = process.cwd();
 const dataDir = process.env.KEHU_DATA_DIR ? path.resolve(process.env.KEHU_DATA_DIR) : path.join(ROOT, config.dataDir || "data");
@@ -43,12 +43,20 @@ async function loadSource(keepOpen = false) {
   const { ctx, page } = await launch();
   try {
     await openDoc(page);
+    if (await isGuestMode(page)) throw new Error("文档游客只读模式（掉登录），复制被禁无法同步——请运行 start-login.bat 重新扫码后重试");
     if (!await clickTab(page, sheet)) throw new Error("找不到 " + sheet + " tab");
-    const cText = await readCell(page, "C" + startRow);
-    const aText = await readCell(page, "A" + startRow);
+    // 表底边缘行渲染慢，readCell 可能读空（C1609 明明有值读到 ""，锚点定位直接失败）——空则重试
+    let cText = "", aText = "";
+    for (let k = 0; k < 3; k++) {
+      if (!String(cText || "").trim()) cText = await readCell(page, "C" + startRow);
+      if (!String(aText || "").trim()) aText = await readCell(page, "A" + startRow);
+      if (String(cText || "").trim() && String(aText || "").trim()) break;
+      if (k < 2) { log("[重试] 起始行读取为空（C=" + JSON.stringify(String(cText || "").slice(0, 20)) + "），2s 后重读"); await new Promise(r => setTimeout(r, 2000)); }
+    }
     log("起始行 A" + startRow + "=" + JSON.stringify(String(aText || "").slice(0, 20)) + "  C" + startRow + "=" + JSON.stringify(String(cText || "").slice(0, 60)));
     // 复制"起始行以下"范围（比全表 Ctrl+A 复制更稳，且正合使用场景）
-    const text = await copyFromRow(page, sheet, startRow, extractOrder(cText));
+    // A 列为空时（新行客服还没填日期）传 emptyA：Ctrl+Shift+Down 需多按一次跨过空档
+    const text = await copyFromRow(page, sheet, startRow, extractOrder(cText), { emptyA: !String(aText || "").trim() });
     return { text, anchorOrder: extractOrder(cText), anchorDate: normDate(aText), anchorText: cText, ctx, page };
   } finally {
     if (!keepOpen) await ctx.close().catch(() => {});
@@ -89,7 +97,13 @@ if (parsed.length > 3000) {
 const fields = parsed.filter(x => x.kind === "record").map(x => extractFields(x.rec, sheet));
 log(sheet + " 解析到 " + parsed.length + " 行（其中含订单号记录 " + fields.filter(f => f.order_no).length + " 条，空白/残留占位 " + parsed.filter(x => x.kind !== "record").length + " 行）");
 
-const anchorIdx = findAnchor(fields, anchorOrder2 || anchorOrder || "", anchorDate, anchorText);
+let anchorIdx = findAnchor(fields, anchorOrder2 || anchorOrder || "", anchorDate, anchorText);
+if ((anchorIdx === null || anchorIdx === undefined) && !copyFile && fields.length > 0) {
+  // C{startRow} 重试后仍读到空时锚点无法匹配——copyFromRow 固定从 startRow 开始复制且复制前
+  // 校验过名称框位置，首个记录块就是起始行，直接锚定（2026-09-16 行1609 C列读空事故）
+  log("[警告] C" + startRow + " 读取为空无法精确锚定，回退锚定首个记录块（复制固定从起始行开始）");
+  anchorIdx = 0;
+}
 if (anchorIdx === null || anchorIdx === undefined) {
   log("无法定位起始行 " + startRow + " 对应的块（起始行可能为空或未复制到）。请检查行号后重试。");
   db.close();
@@ -103,10 +117,17 @@ let inserted = 0, updated = 0, skipped = 0, srcFilled = 0, noOrder = 0, blanks =
 const catFixes = [];   // 复制未含"问题归类"列时，待逐格读取 D 列补全的行
 let recIdx = -1;          // 已扫描到的记录索引
 let started = false;      // 锚点之后才开始处理
+let consecBlank = 0;      // 连续占位行数（空白 + 日期残留都算）
+let stoppedEarly = false; // 连续 3 条占位行 → 不再入库占位行（后续真实记录仍正常同步）
 const base = startRow - anchorOffset;
 for (const item of parsed) {
   if (item.kind !== "record") {
     if (!started) continue;          // 锚点之前的占位行不处理
+    // blank = A-D 全空；residue = A 列日期残留（客服预填日期）。两者都算占位行——
+    // residue 曾把计数器清零，导致表底大量残留行全部入库（2026-09-23 同步 23 条空白占位）。
+    // 连续 3 条后不再入库占位行，但继续扫描（不 break）：表底之后的真实记录仍会同步，不会漏。
+    consecBlank++;
+    if (consecBlank >= 3) { stoppedEarly = true; continue; }
     const row = base + (item.offset ?? 0);
     upsertBlankRow(db, sheet, row);
     blanks++;
@@ -116,6 +137,7 @@ for (const item of parsed) {
   recIdx++;
   if (recIdx < anchorIdx) continue;  // 锚点之前的记录不处理
   started = true;
+  consecBlank = 0;
   const row = base + (item.rec.offset ?? recIdx);
   const f = extractFields(item.rec, sheet);
   if (!f.order_no) {
@@ -162,6 +184,7 @@ for (const item of parsed) {
   lastInsertedRow = row;
 }
 // 验证对齐：读取最后一行 C 列订单号与最后一条记录比对，检测 Ctrl+Shift+ArrowDown 漏空白行的偏移
+// 占位行提前截断后真实记录仍全部入库，校验依然有效（不再因 stoppedEarly 跳过）
 if (page && lastInsertedRow && fields.length > anchorIdx + 1) {
   const lastField = fields[fields.length - 1];
   if (lastField.order_no && lastField.offset != null) {
@@ -215,7 +238,7 @@ if (catFixes.length && page) {
 }
 if (ctx) await ctx.close().catch(() => {});
 const lastRow = lastInsertedRow || startRow;
-state[sheet] = { ...(state[sheet] || {}), lastRow, startRow, count: fields.length - anchorIdx, updatedAt: new Date().toISOString() };
+state[sheet] = { ...(state[sheet] || {}), lastRow, startRow, count: Math.max(0, recIdx - anchorIdx), stoppedEarly, updatedAt: new Date().toISOString() };
 saveState(state);
-log(`同步完成: ${sheet} 从 ${startRow} 行起（表内到约 ${lastRow} 行），新增 ${inserted}, 更新 ${updated}, 跳过(已存在) ${skipped}, 空白占位 ${blanks}, 无订单行 ${noOrder}, 源表已填 ${srcFilled} 条`);
+log(`同步完成: ${sheet} 从 ${startRow} 行起（表内到约 ${lastRow} 行）${stoppedEarly ? "，连续 3 条空白/残留占位行后未再入库占位行" : ""}，新增 ${inserted}, 更新 ${updated}, 跳过(已存在) ${skipped}, 空白占位 ${blanks}, 无订单行 ${noOrder}, 源表已填 ${srcFilled} 条`);
 db.close();

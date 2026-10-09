@@ -250,6 +250,11 @@ function extractNewContact(ci) {
   const m = s.match(/更换通知方式\s*(\d{6,})/) || s.match(/通知\s*(\d{6,})/);
   return m ? m[1] : "";
 }
+// 通用提取 11 位手机号（1[3-9] 开头、前后非数字——19 位订单号不会误匹配），取最后一个匹配
+function extractPhoneFromText(ci) {
+  const ms = [...String(ci || "").matchAll(/(?<!\d)1[3-9]\d{9}(?!\d)/g)];
+  return ms.length ? ms[ms.length - 1][0] : "";
+}
 function extractProblem(ci) {
   const lines = String(ci || "").split(/\n+/).map(s => s.trim()).filter(Boolean);
   const last = lines[lines.length - 1] || "";
@@ -274,8 +279,11 @@ function computeTalk(row) {
   }
   if (tmpl) {
     let newContact = extractNewContact(row.customer_info);
-    if ((cat === "更换通知方式" || cat === "更换联系方式") && (!newContact || newContact === phone)) {
-      newContact = phone;
+    // 与 web/index.html 同规则：更换联系方式类，C 列窄正则抓不到时通用提取 11 位手机号；
+    // 提取不到或与登记电话一致 → 用哆啦号
+    if (cat === "更换通知方式" || cat === "更换联系方式") {
+      if (!newContact) newContact = extractPhoneFromText(row.customer_info);
+      if (!newContact || newContact === phone) newContact = phone;
     }
     return String(tmpl)
       .replace(/\{期次\}/g, period)
@@ -313,17 +321,67 @@ function buildText(t) {
 }
 
 // ---------- 发送 ----------
-async function sendMsg(bin, recv, text, uuid) {
-  const base = ["chat", "message", "send"];
-  if (recv.userId) base.push("--user", recv.userId);
-  else if (recv.openDingTalkId) base.push("--open-dingtalk-id", recv.openDingTalkId);
-  else return { err: new Error("没有可用的 userId/openDingTalkId") };
-  base.push("--text", text, "--uuid", uuid, "--format", "json");
-  const r1 = await runDws(bin, [...base, "--yes"], 60000);
-  if (r1.err && /unknown (flag|shorthand)/i.test(String(r1.stderr + r1.stdout))) {
-    return runDws(bin, base, 60000);   // 旧版不接受 --yes 时去掉重试
+// 钉钉服务端有间歇性错误（THREADPOOL_BUSY/HSF 线程池满、超时等，dws 会标 retryable:true），
+// 必须自动重试，否则批量发送会出现一批随机失败；uuid 幂等保证重试不会重复投递。
+const SEND_ATTEMPTS = 3;
+function dwsOutputJson(r) {
+  const raw = String(r.stderr || "") + "\n" + String(r.stdout || "");
+  const s = raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1);
+  try { return JSON.parse(s); } catch (e) { return null; }
+}
+function dwsSendOk(r) {
+  if (r.err) return false;
+  const j = dwsOutputJson(r);
+  if (j && j.success === false) return false;
+  return true;
+}
+function isRetryableDws(r) {
+  const raw = String(r.stderr || "") + "\n" + String(r.stdout || "") + "\n" + String((r.err && r.err.message) || "");
+  if (/调用超时|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN/i.test(raw)) return true;
+  const j = dwsOutputJson(r);
+  if (j) {
+    const e = j.error || j;
+    if (e.retryable === true) return true;
+    const blob = JSON.stringify(j);
+    if (/THREADPOOL_BUSY|thread pool|busy|throttl|rate[._ ]?limit|限流|频繁|timeout|超时/i.test(blob)) return true;
   }
-  return r1;
+  return false;
+}
+function dwsErrorText(r) {
+  const j = dwsOutputJson(r);
+  let text;
+  if (j) text = (j.error && (j.error.message || j.error.hint || j.error.technical_detail)) || j.errorMsg || j.message || JSON.stringify(j);
+  else text = (r.err && r.err.message) || String(r.stderr || r.stdout || "").trim() || "未知错误";
+  return String(text).replace(/\s+/g, " ").slice(0, 200);
+}
+async function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
+async function sendMsg(bin, recv, text, uuid) {
+  if (!recv.userId && !recv.openDingTalkId) return { err: new Error("没有可用的 userId/openDingTalkId") };
+  // userId 通道优先；若服务端报 cannot resolve（tutor_map 缓存的 userId 失效），自动降级 openDingTalkId
+  const modes = recv.userId ? ["user", "open"] : ["open"];
+  let last = null;
+  for (let m = 0; m < modes.length; m++) {
+    const useOpen = modes[m] === "open";
+    for (let i = 1; i <= SEND_ATTEMPTS; i++) {
+      const base = ["chat", "message", "send"];
+      if (useOpen) base.push("--open-dingtalk-id", recv.openDingTalkId);
+      else base.push("--user", recv.userId);
+      base.push("--text", text, "--uuid", uuid, "--format", "json");
+      const r1 = await runDws(bin, [...base, "--yes"], 60000);
+      if (!r1.err && /unknown (flag|shorthand)/i.test(String(r1.stderr + r1.stdout))) {
+        last = await runDws(bin, base, 60000);   // 旧版不接受 --yes 时去掉重试
+      } else {
+        last = r1;
+      }
+      if (dwsSendOk(last)) return last;
+      const blob = String(last.stderr || "") + String(last.stdout || "") + String((last.err && last.err.message) || "");
+      if (!useOpen && /cannot resolve/i.test(blob)) break;   // userId 无效，换通道（不做无谓重试）
+      if (i < SEND_ATTEMPTS && isRetryableDws(last)) { await sleep(i * 2000); continue; }
+      break;
+    }
+    if (m === modes.length - 1 || !/cannot resolve/i.test(String(last.stderr || "") + String(last.stdout || "") + String((last.err && last.err.message) || ""))) return last;
+  }
+  return last;
 }
 
 // ---------- 主流程 ----------
@@ -343,7 +401,8 @@ async function main() {
   } else if (MODE === "auto") {
     targets = db.prepare(`SELECT * FROM complaints WHERE writeback_status='ok' AND (ding_status IS NULL OR ding_status='') AND fill_tutor IS NOT NULL AND fill_tutor != ''`).all();
   } else if (MODE === "all") {
-    targets = db.prepare(`SELECT * FROM complaints WHERE query_status != 'not_found' AND fill_tutor IS NOT NULL AND fill_tutor != '' AND fill_period IS NOT NULL AND fill_period != '' AND fill_period != '系统未掉落' AND fill_phone IS NOT NULL AND fill_phone != '' AND (fill_tutor NOT LIKE '%爱芯过滤%' AND fill_tutor NOT LIKE '%正价课拦截%') AND (ding_status IS NULL OR ding_status='' OR ding_status='fail')`).all();
+    // 爱芯过滤/正价课拦截 也选进来，循环里统一标"过滤"（不发送、不算失败）
+    targets = db.prepare(`SELECT * FROM complaints WHERE query_status != 'not_found' AND fill_tutor IS NOT NULL AND fill_tutor != '' AND fill_period IS NOT NULL AND fill_period != '' AND fill_period != '系统未掉落' AND fill_phone IS NOT NULL AND fill_phone != '' AND (ding_status IS NULL OR ding_status='' OR ding_status='fail')`).all();
   }
   if (!targets.length) {
     clearProgress();
@@ -357,37 +416,41 @@ async function main() {
   const total = targets.length;
   const results = [];
   writeProgress(total, 0);
-  for (const t of targets) {
-    done++;
-    writeProgress(total, done);
+  // 单条处理（原来是大 for 循环串行；拆出来配合下面的并发池，失败重试逻辑见 sendMsg）
+  async function processOne(t) {
     const tutor = String(t.fill_tutor || t.src_tutor || "").trim();
     let searchHint = "";
     if (!tutor) {
       upd.run("skip", "无顾问，跳过", nowStr(), t.id);
-      skipped++; results.push({ id: t.id, status: "skip", reason: "无顾问" });
-      continue;
+      return { kind: "skip", obj: { id: t.id, status: "skip", reason: "无顾问" } };
     }
     const oldNote = (config.periodRule && config.periodRule.oldNote) || "二转";
-    if (tutor === oldNote || tutor.includes("爱芯过滤")) {
-      // 二转/爱芯过滤 → 走 webhook 机器人发群消息
+    // 爱芯过滤（线索已下发、爱芯侧过滤未分配）/ 正价课拦截（线索未下发爱芯）→ 无需通知，
+    // 直接标"过滤"，绝不走单聊（fill_tutor 是整段备注，匹配不到联系人会被标"失败"）
+    const _ft = String(t.fill_tutor || "");
+    const _fb = String((t.query_remark || "") + "|" + (t.category || ""));
+    if (_ft.includes("爱芯过滤") || _ft.includes("正价课拦截") || _fb.includes("爱芯过滤") || _fb.includes("正价课拦截")) {
+      upd.run("filtered", "爱芯过滤/正价课拦截：线索未下发或被爱芯侧过滤，无需钉钉通知", nowStr(), t.id);
+      log(`[${t.id}] ${t.sheet} 单${t.order_no} 过滤单（爱芯过滤/正价课拦截）→ 标记 filtered，不发送`);
+      return { kind: "skip", obj: { id: t.id, status: "filtered", reason: "过滤单（爱芯过滤/正价课拦截）" } };
+    }
+    if (tutor === oldNote) {
+      // 二转 → 走 webhook 机器人发群消息
       const text = buildText(t);
       const wr = await sendWebhook(text);
       if (wr.ok) {
         upd.run("ok", "已发群消息（" + tutor + "）", nowStr(), t.id);
         updProcessed.run(nowStr(), t.id);
-        sent++; results.push({ id: t.id, status: "ok", reason: "webhook-" + tutor });
         log(`[${t.id}] ${t.sheet} 单${t.order_no} 已发群消息（${tutor}）`);
-      } else {
-        upd.run("fail", "群消息发送失败：" + (wr.error || ""), nowStr(), t.id);
-        fail++; results.push({ id: t.id, status: "fail", reason: "webhook: " + (wr.error || "") });
-        log(`[${t.id}] ${t.sheet} 单${t.order_no} 群消息发送失败: ${wr.error}`);
+        return { kind: "ok", obj: { id: t.id, status: "ok", reason: "webhook-" + tutor } };
       }
-      continue;
+      upd.run("fail", "群消息发送失败：" + (wr.error || ""), nowStr(), t.id);
+      log(`[${t.id}] ${t.sheet} 单${t.order_no} 群消息发送失败: ${wr.error}`);
+      return { kind: "fail", obj: { id: t.id, status: "fail", reason: "webhook: " + (wr.error || "") } };
     }
     if (!auth.ok) {
       upd.run("fail", "钉钉未登录，请点网页【钉钉登录】或运行 dws auth login", nowStr(), t.id);
-      fail++; results.push({ id: t.id, status: "fail", reason: "钉钉未登录" });
-      continue;
+      return { kind: "fail", obj: { id: t.id, status: "fail", reason: "钉钉未登录" } };
     }
     // 收件人解析：手动映射优先；自动匹配要求"唯一候选"才算确认（dws 无邮箱字段，无法做邮箱前缀校验）
     let recv = null;
@@ -406,30 +469,44 @@ async function main() {
     }
     if (!recv || (!recv.userId && !recv.openDingTalkId)) {
       upd.run("fail", "未匹配到顾问（需唯一确认）：" + tutor + "（" + (searchHint || "可在 data/tutor_map.json 手动补充 userId") + "）", nowStr(), t.id);
-      fail++; results.push({ id: t.id, status: "fail", reason: "未确认顾问：" + tutor });
-      continue;
+      return { kind: "fail", obj: { id: t.id, status: "fail", reason: "未确认顾问：" + tutor } };
     }
     const text = buildText(t);
     const uuid = MODE === "auto" ? ("ding-auto-" + t.id) : ("ding-man-" + t.id + "-" + Date.now());
     if (DRY_RUN) {
       log(`[dry-run] id=${t.id} 单${t.order_no} → ${tutor}(${recv.userId || recv.openDingTalkId}) uuid=${uuid}\n` + text);
-      continue;
+      return { kind: "dry", obj: null };
     }
     const r = await sendMsg(bin, recv, text, uuid);
-    if (r.err) {
-      const reason = String(r.stderr || r.stdout || r.err.message || "").split("\n")[0].slice(0, 200);
-      upd.run("fail", "发送失败：" + reason, nowStr(), t.id);
-      fail++; results.push({ id: t.id, status: "fail", reason });
+    if (!dwsSendOk(r)) {
+      const reason = dwsErrorText(r);
+      upd.run("fail", "发送失败（重试 " + SEND_ATTEMPTS + " 次后）：" + reason, nowStr(), t.id);
       log(`[${t.id}] 发送失败: ${reason}`);
-    } else {
-      upd.run("ok", "已发送给顾问：" + tutor, nowStr(), t.id);
-      const wbRow4 = db.prepare("SELECT writeback_status, fill_period, fill_tutor FROM complaints WHERE id=?").get(t.id);
-      const isFilt4 = wbRow4 && (wbRow4.fill_period === '系统未掉落' || (wbRow4.fill_tutor||'').includes('爱芯过滤') || (wbRow4.fill_tutor||'').includes('正价课拦截'));
-      if (!wbRow4 || isFilt4 || wbRow4.writeback_status === 'ok') updProcessed.run(nowStr(), t.id);
-      sent++; results.push({ id: t.id, status: "ok", tutor });
-      log(`[${t.id}] ${t.sheet} 单${t.order_no} 已发送给 ${tutor}`);
+      return { kind: "fail", obj: { id: t.id, status: "fail", reason } };
+    }
+    upd.run("ok", "已发送给顾问：" + tutor, nowStr(), t.id);
+    const wbRow4 = db.prepare("SELECT writeback_status, fill_period, fill_tutor FROM complaints WHERE id=?").get(t.id);
+    const isFilt4 = wbRow4 && (wbRow4.fill_period === '系统未掉落' || (wbRow4.fill_tutor||'').includes('爱芯过滤') || (wbRow4.fill_tutor||'').includes('正价课拦截'));
+    if (!wbRow4 || isFilt4 || wbRow4.writeback_status === 'ok') updProcessed.run(nowStr(), t.id);
+    log(`[${t.id}] ${t.sheet} 单${t.order_no} 已发送给 ${tutor}`);
+    return { kind: "ok", obj: { id: t.id, status: "ok", tutor } };
+  }
+  // 并发池：每条消息单独起一个 dws 进程（~3s），串行 30+ 条要 5 分钟；3 路并发 + 失败重试
+  const CONC = 3;
+  let cursor = 0;
+  async function worker() {
+    while (cursor < targets.length) {
+      const t = targets[cursor++];
+      const r = await processOne(t);
+      if (r.kind === "ok") sent++;
+      else if (r.kind === "fail") fail++;
+      else if (r.kind === "skip") skipped++;
+      if (r.obj) results.push(r.obj);
+      done++;
+      writeProgress(total, done);
     }
   }
+  await Promise.all(Array.from({ length: Math.min(CONC, targets.length) }, worker));
   clearProgress();
   log("钉钉发送完成: 成功 " + sent + ", 失败 " + fail + ", 跳过 " + skipped);
   log("__DING_JSON__" + JSON.stringify({ ok: fail === 0, sent, fail, skipped, results }));
