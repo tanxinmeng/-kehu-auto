@@ -1333,7 +1333,10 @@ async function pollBatchResult(sheet, phase) {
       if (phase === "check") {
         if (res.ok) {
           // 核对通过（行号与订单号和源表一致）→ 不再弹窗确认，直接执行回填
-          setMsg("核对通过：顶" + res.top + " / 中" + res.middle + " / 底" + res.bottom + " 行号与订单号均与源表一致（共 " + res.N + " 条记录），直接执行回填...", "#1f6e43");
+          const recMsg = res.reconciled ? "（已按源表自动对齐：" + res.reconciled + "）" : "";
+          const refMsg = res.refreshedIds && res.refreshedIds.length ? "，改动行 " + res.refreshedIds.length + " 条已自动排队补全" : "";
+          const appMsg = res.appended ? "，源表尾部新增 " + res.appended + " 行待下次同步" : "";
+          setMsg("核对通过：顶" + res.top + " / 中" + res.middle + " / 底" + res.bottom + " 行号与订单号均与源表一致（共 " + res.N + " 条）" + recMsg + refMsg + appMsg + "，直接执行回填...", "#1f6e43");
           syncing = false; enableBtns();
           await batchFillExec(sheet);
           return;
@@ -1342,7 +1345,8 @@ async function pollBatchResult(sheet, phase) {
         }
       } else {
         if (res.ok) {
-          setMsg("批量回填成功：已写入 " + (res.written || 0) + " 条记录（第" + res.top + "-" + res.bottom + " 行），末尾校验通过", "#1f6e43");
+          const skipMsg = res.skipped ? "，跳过 " + res.skipped + " 条未就绪（无订单/待查询）" : "";
+          setMsg("批量回填成功：已写入 " + (res.written || 0) + " 条记录（第" + res.top + "-" + res.bottom + " 行），末尾校验通过" + skipMsg, "#1f6e43");
           load(0, true);
           startPoll();
         } else {

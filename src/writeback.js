@@ -16,8 +16,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import config from "../config.json" with { type: "json" };
-import { openDb } from "./db.js";
-import { parseCopy, extractFields, extractOrder, normDate } from "./blocks.js";
+import { openDb, upsertComplaint } from "./db.js";
+import { parseCopy, parseCopyWithBlanks, extractFields, extractOrder, normDate, alignDiff } from "./blocks.js";
 import { log, launch, openDoc, clickTab, readCell, gotoCell, copyFromRow } from "./browser.js";
 
 const ROOT = process.cwd();
@@ -148,12 +148,25 @@ async function findRow(page, target, candidates, range = 6) {
       if (retry < 2) await page.waitForTimeout(1500);
     }
     if (!cTxt.includes(orderNo)) {
-      log('  tryRow C' + row + ' 不含订单 ' + orderNo + '，读到: ' + JSON.stringify(cTxt.slice(0, 80)));
-      return null;
+      // 防残留值误判：名称框导航已确认但新格内容未渲染完时，readCell 会把上一格文本当成
+      // 本行（2026-10-10 19:18 批量回填 7 条全误判"无法定位到行"，同格 20s 后重读即正确）。
+      // 不含订单 ≠ 真不匹配——等 2.5s 复读一次，仍不含才算真不匹配
+      await page.waitForTimeout(2500);
+      const cTxt2 = await readCell(page, 'C' + row);
+      if (String(cTxt2 || "").includes(orderNo)) {
+        cTxt = cTxt2;
+      } else {
+        log('  tryRow C' + row + ' 不含订单 ' + orderNo + '，读到: ' + JSON.stringify(cTxt.slice(0, 80)));
+        return null;
+      }
     }
     if (wantDate) {
-      const aTxt = await readCell(page, 'A' + row);
-      const aDate = normDate(aTxt);
+      let aTxt = await readCell(page, 'A' + row);
+      let aDate = normDate(aTxt);
+      if (aDate && aDate !== wantDate) {
+        await page.waitForTimeout(2500);
+        aDate = normDate(await readCell(page, 'A' + row));
+      }
       if (aDate && aDate !== wantDate) return null;
     }
     return { row, text: cTxt.slice(0, 60) };
@@ -237,23 +250,22 @@ function batchWebMap(sheet) {
   return map;
 }
 async function batchCheck() {
-  // 多采样点逐格校验：用 readCell 直接导航到 C 列（避免 copyFromRow 的行号映射偏差）
-  const recs = db.prepare("SELECT src_row, order_no FROM complaints WHERE sheet=? AND is_blank=0 AND src_row IS NOT NULL AND order_no != '' ORDER BY src_row").all(batchSheet);
-  if (!recs.length) { console.log("__BATCH_JSON__" + JSON.stringify({ ok:false, phase:"check", reason:"该表没有已同步的有效记录" })); db.close(); return; }
+  // 源表为准（2026-10-12）：整段复制一次 + 本地全量 diff，取代采样逐格读。
+  //   插行/删行（含空白行）→ alignDiff 精确定位偏移起点，受影响段平移 src_row；
+  //   订单号被改/新增 → 就地按源表刷新入库（upsertComplaint：订单变了旧查询结果作废待重查）；
+  //   行被删/清空 → 按源表清除；
+  //   执行阶段跳过未就绪的行（skipRows 写入 state），不再一票否决整批；
+  //   兜底：整段复制失败 → 退回采样逐格读校验（只读不修，报错走人工）。
+  let top = 0, middle = 0, bottom = 0, N = 0;
+  let shiftCount = 0, refreshedCount = 0, pendingCount = 0, clearedCount = 0, appendedCount = 0;
+  let lastB = 0, lastK = 0, note = "", fatal = "";
+  const refreshedIds = [];
+  const dbRowsStmt = () => db.prepare("SELECT id, src_row, order_no, is_blank, query_status FROM complaints WHERE sheet=? AND src_row IS NOT NULL ORDER BY src_row").all(batchSheet);
+  let allRows = dbRowsStmt();
+  if (!allRows.some(r => !r.is_blank && r.order_no)) { console.log("__BATCH_JSON__" + JSON.stringify({ ok:false, phase:"check", reason:"该表没有已同步的有效记录" })); db.close(); return; }
   // 只清 mismatch，不清 writeback_msg：清掉 msg 会抹掉上次失败的诊断原因（只显示"失败"无从排查）
   db.prepare("UPDATE complaints SET mismatch=0 WHERE sheet=?").run(batchSheet);
-  const top = recs[0].src_row;
-  const bottom = recs[recs.length - 1].src_row;
-  const middle = recs[Math.floor((recs.length - 1) / 2)].src_row;
-  const web = batchWebMap(batchSheet);
-  // 每隔 ~N 行取一个采样点（至少 top/middle/bottom，总共 ~10 个点）
-  const step = Math.max(1, Math.floor((bottom - top) / 10));
-  const samples = new Set([top, middle, bottom]);
-  for (let r = top + step; r < bottom; r += step) samples.add(r);
-  const sampleList = [...samples].sort((a, b) => a - b);
-  log("批量检查：采样 " + sampleList.length + " 个点（共 " + recs.length + " 条记录）");
   const { ctx, page } = await launch();
-  let mismatches = [];
   try {
     await openDoc(page);
     const barOk = await page.locator("input.bar-label").count();
@@ -261,65 +273,187 @@ async function batchCheck() {
     await assertDocWritable(page);
     await clickTab(page, batchSheet);
     await page.waitForTimeout(2500);
-    for (const r of sampleList) {
-      let srcOrder = "";
-      for (let retry = 0; retry < 3; retry++) {
-        const cTxt = await readCell(page, "C" + r);
-        srcOrder = extractOrder(cTxt);
-        if (srcOrder) break;
-        if (retry < 2) await page.waitForTimeout(2000);
+    for (let round = 1; round <= 4 && !fatal; round++) {
+      allRows = dbRowsStmt();
+      const dbMap = {};
+      top = 0; bottom = 0;
+      for (const r of allRows) {
+        dbMap[r.src_row] = r.is_blank ? "" : String(r.order_no || "");
+        if (!r.is_blank && r.order_no) {
+          if (!top || r.src_row < top) top = r.src_row;
+          if (r.src_row > bottom) bottom = r.src_row;
+        }
       }
-      const want = String((web[r] || {}).order || "");
-      if (srcOrder !== want) {
-        mismatches.push({ row: r, srcOrder, want });
-        if (mismatches.length >= 20) break;
+      const orderedRows = allRows.filter(r => !r.is_blank && r.order_no).map(r => r.src_row);
+      N = orderedRows.length;
+      middle = orderedRows[Math.floor((orderedRows.length - 1) / 2)];
+      const topOrder = String(dbMap[top] || "");
+      if (!topOrder) { fatal = "该表没有已同步的有效记录"; break; }
+      log("批量检查第" + round + "轮：范围 " + top + "-" + bottom + "（共 " + N + " 条记录），整段复制源表…");
+      // 快路径：从 top 整段复制到表底，一次拿到源表现状
+      let srcMap = null, srcMax = top;
+      try {
+        const text = await copyFromRow(page, batchSheet, top, topOrder, { retries: 2 });
+        const parsed = parseCopyWithBlanks(text);
+        const recItems = parsed.filter(x => x.kind === "record");
+        let anchorIdx = recItems.findIndex(x => extractFields(x.rec, batchSheet).order_no === topOrder);
+        if (anchorIdx < 0) { log("[警告] 复制内容未找到首行订单锚点，回退锚定首个记录块"); anchorIdx = 0; }
+        const base = top - (recItems[anchorIdx].rec.offset ?? anchorIdx);
+        srcMap = {};
+        for (const item of parsed) {
+          const off = item.kind === "record" ? (item.rec.offset ?? 0) : (item.offset ?? 0);
+          const row = base + off;
+          if (row < top) continue;
+          if (item.kind === "record") {
+            const f = extractFields(item.rec, batchSheet);
+            srcMap[row] = f.order_no || "";
+            srcMap["#" + row] = f;   // 该行完整字段，供 rows 分支刷新入库
+          }
+          if (row > srcMax) srcMax = row;
+        }
+      } catch (e) {
+        log("[警告] 整段复制失败（" + String(e.message || e).split("\n")[0] + "），退回采样逐格读校验");
+      }
+      let progressed = false;
+      if (srcMap) {
+        const d = alignDiff(dbMap, srcMap, top, bottom, srcMax);
+        appendedCount = 0;
+        for (let r = bottom + 1; r <= srcMax; r++) if (srcMap[r]) appendedCount++;
+        if (d.type === "clean") {
+          if (appendedCount) log("源表第" + bottom + "行之后新增 " + appendedCount + " 行订单，超出本批范围（重新同步即可纳入），本轮不处理");
+          break;
+        }
+        if (d.type === "shift") {
+          const { B, k, orphans } = d;
+          // 占位行是同步快照，平移后必然错位，直接清掉（下次同步重建）
+          db.prepare("DELETE FROM complaints WHERE sheet=? AND is_blank=1 AND src_row>=?").run(batchSheet, B);
+          for (const orow of orphans) {
+            db.prepare("DELETE FROM complaints WHERE sheet=? AND src_row=? AND order_no != ''").run(batchSheet, orow);
+            clearedCount++;
+            log("行" + orow + " 订单已从源表删除（原" + (dbMap[orow] || "") + "），按源表清除");
+          }
+          // dedup_key UNIQUE：先置临时键、平移 src_row、再落最终键
+          // （单条 UPDATE 里 dedup_key=sheet||'|'||src_row 取的是平移前旧值，必须拆开）
+          const lo = k > 0 ? B : B + 1;
+          db.prepare("UPDATE complaints SET dedup_key='rebase:'||id WHERE sheet=? AND src_row>=?").run(batchSheet, lo);
+          db.prepare("UPDATE complaints SET src_row=src_row+? WHERE dedup_key LIKE 'rebase:%'").run(k);
+          db.prepare("UPDATE complaints SET dedup_key=sheet||'|'||src_row WHERE dedup_key LIKE 'rebase:%'").run();
+          shiftCount++; lastB = B; lastK = k;
+          log("源表第" + B + "行起整体偏移 " + (k > 0 ? "+" : "") + k + " 行，库中行号已平移，重新校验");
+          progressed = true;
+        } else if (d.type === "rows") {
+          if (d.changes.length > 30) { fatal = "源表与库差异过大（" + d.changes.length + " 行），请先重新同步再批量回填"; break; }
+          for (const ch of d.changes) {
+            if (ch.srcOrder) {
+              const f = srcMap["#" + ch.row];
+              const rec = { sheet: batchSheet, src_row: ch.row, feedback_date: f ? f.feedback_date : null, customer_info: f ? f.customer_info : null, order_no: ch.srcOrder, category: f ? f.category : null, src_period: f ? f.src_period : null, src_phone: f ? f.src_phone : null, src_tutor: f ? f.src_tutor : null, src_feedback: f ? f.src_feedback : null, date_key: null, dedup_key: batchSheet + "|" + ch.row };
+              if (f && f.src_period && f.src_phone && f.src_tutor) {
+                rec.fill_period = f.src_period; rec.fill_phone = f.src_phone; rec.fill_tutor = f.src_tutor;
+                rec.query_status = "filled"; rec.processed = "是"; rec.query_remark = "源表已填";
+              } else {
+                pendingCount++;
+              }
+              const res = upsertComplaint(db, rec);
+              refreshedIds.push(res.id);
+              refreshedCount++;
+              log("行" + ch.row + " 订单 " + (ch.dbOrder || "(空)") + "→" + ch.srcOrder + "，已按源表更新" + (ch.dbOrder && ch.dbOrder !== ch.srcOrder ? "（旧查询结果作废，需重新查询）" : ""));
+            } else {
+              db.prepare("UPDATE complaints SET order_no='', fill_period=NULL, fill_phone=NULL, fill_tutor=NULL, query_status='blank', processed='', writeback_status='', mismatch=0, query_remark=? WHERE sheet=? AND src_row=? AND order_no != ''")
+                .run("源表该行订单已删除/清空，按源表清除", batchSheet, ch.row);
+              clearedCount++;
+              log("行" + ch.row + " 源表已无订单（原" + ch.dbOrder + "），按源表清除");
+            }
+            progressed = true;
+          }
+        }
       } else {
-        log("[检查] 行" + r + " 订单" + srcOrder + " \u2713");
+        // 兜底：采样逐格读校验（老路径，只读不修，对不上即报错走人工）
+        const web = batchWebMap(batchSheet);
+        const step = Math.max(1, Math.floor((bottom - top) / 10));
+        const samples = new Set([top, middle, bottom]);
+        for (let r = top + step; r < bottom; r += step) samples.add(r);
+        let mismatches = 0, first = "";
+        for (const r of [...samples].sort((a, b) => a - b)) {
+          let srcOrder = "";
+          for (let retry = 0; retry < 3; retry++) {
+            srcOrder = extractOrder(await readCell(page, "C" + r));
+            if (srcOrder) break;
+            if (retry < 2) await page.waitForTimeout(2000);
+          }
+          const want = String((web[r] || {}).order || "");
+          if (srcOrder !== want) { mismatches++; if (!first) first = "第" + r + "行 源[" + srcOrder + "]≠库[" + want + "]"; }
+        }
+        if (mismatches) { fatal = "对齐校验失败：" + first + (mismatches > 1 ? " 等共" + mismatches + "处（整段复制不可用，无法自动对齐）" : ""); break; }
+        break;
       }
+      if (!progressed) { fatal = "对齐失败：源表与库无法自动对齐，请重新同步后再批量回填"; break; }
     }
+  } catch (e) {
+    fatal = String(e.message || e).split("\n")[0];
   } finally {
     await ctx.close().catch(() => {});
   }
-  if (mismatches.length) {
-    const detail = mismatches.slice(0, 5).map(m => "第" + m.row + "行 源[" + m.srcOrder + "]\u2260库[" + m.want + "]").join("\uff1b");
-    const tail = mismatches.length > 5 ? " \u2026等共" + mismatches.length + "处" : "";
-    console.log("__BATCH_JSON__" + JSON.stringify({ ok:false, phase:"check", reason:"对齐校验失败：" + detail + tail, top, middle, bottom, mismatchCount: mismatches.length, sampleMismatches: mismatches.slice(0, 5) }));
+  if (fatal) {
+    console.log("__BATCH_JSON__" + JSON.stringify({ ok:false, phase:"check", reason: fatal, top, middle, bottom, N }));
     db.close();
     return;
   }
-  const state = { sheet: batchSheet, top, bottom, middle, N: recs.length, checkedAt: new Date().toISOString() };
+  // 最终状态：重算范围 + 未就绪行（执行阶段跳过，不再一票否决整批）
+  allRows = dbRowsStmt();
+  const orderedRows = allRows.filter(r => !r.is_blank && r.order_no).map(r => r.src_row);
+  if (!orderedRows.length) { console.log("__BATCH_JSON__" + JSON.stringify({ ok:false, phase:"check", reason:"该表没有已同步的有效记录" })); db.close(); return; }
+  top = orderedRows[0]; bottom = orderedRows[orderedRows.length - 1];
+  middle = orderedRows[Math.floor((orderedRows.length - 1) / 2)];
+  N = orderedRows.length;
+  const byRow = new Map(allRows.map(r => [r.src_row, r]));
+  const skipRows = [];
+  for (let r = top; r <= bottom; r++) {
+    const rec = byRow.get(r);
+    // 库内无记录的行绝不写入（防止把源表已有内容清空）；无订单/待查询的行本轮跳过
+    if (!rec || rec.is_blank || !rec.order_no || rec.query_status === "pending") skipRows.push(r);
+  }
+  const parts = [];
+  if (shiftCount) parts.push("源表第" + lastB + "行起偏移" + (lastK > 0 ? "+" : "") + lastK + "行已自动对齐");
+  if (refreshedCount) parts.push(refreshedCount + "行订单已按源表更新" + (pendingCount ? "（其中" + pendingCount + "行需重新查询）" : ""));
+  if (clearedCount) parts.push(clearedCount + "行已按源表清除");
+  note = parts.join("；");
+  if (note) log(note);
+  const state = { sheet: batchSheet, top, bottom, middle, N, skipRows, checkedAt: new Date().toISOString() };
   fs.writeFileSync(batchStateFile, JSON.stringify(state, null, 2), "utf8");
-  console.log("__BATCH_JSON__" + JSON.stringify({ ok:true, phase:"check", sheet:batchSheet, top, bottom, middle, N: recs.length, ordersMatch:true }));
+  console.log("__BATCH_JSON__" + JSON.stringify({ ok:true, phase:"check", sheet:batchSheet, top, bottom, middle, N, ordersMatch:true, reconciled: note || undefined, refreshedIds: [...new Set(refreshedIds)], appended: appendedCount || undefined }));
   db.close();
 }
 async function batchExec() {
   if (!fs.existsSync(batchStateFile)) { console.log("__BATCH_JSON__" + JSON.stringify({ ok:false, phase:"exec", reason:"请先执行批量检查" })); db.close(); return; }
   const st = JSON.parse(fs.readFileSync(batchStateFile, "utf8"));
   const top = st.top, bottom = st.bottom, middle = st.middle, N = st.N || 0;
+  // 未就绪的行（库内无记录/无订单/待查询）跳过不写，不再一票否决整批（2026-10-12 源表为准）
+  const skipSet = new Set(st.skipRows || []);
   const web = batchWebMap(batchSheet);
-  const samples = [top, middle, bottom];
+  const samples = [top, middle, bottom].filter(r => !skipSet.has(r));
   const { ctx, page } = await launch();
-  let written = 0, rolledBack = false, reason = "", ok = false;
+  let written = 0, skippedCount = 0, rolledBack = false, reason = "", ok = false;
   try {
     await openDoc(page);
     const barOk = await page.locator("input.bar-label").count();
     if (!barOk) throw new Error("腾讯文档未就绪（可能登录过期，请运行 start-login.bat 重新扫码）");
     await assertDocWritable(page);
     await clickTab(page, batchSheet);
-    // 预校验：顶/中/底 行号+订单号
+    // 预校验：顶/中/底 行号+订单号（跳过的行不校验）
     for (const r of samples) {
       const cTxt = await readCell(page, "C" + r);
       const srcOrder = extractOrder(cTxt);
       const want = (web[r] || {}).order || "";
       if (srcOrder !== want) throw new Error("对齐校验失败：第" + r + "行 源表订单[" + srcOrder + "] 与网页[" + want + "] 不一致，已中止（未粘贴）");
     }
-    log("批量预校验通过：顶" + top + " / 中" + middle + " / 底" + bottom + " 行号与订单一致");
+    log("批量预校验通过：顶" + top + " / 中" + middle + " / 底" + bottom + " 行号与订单一致" + (skipSet.size ? "（跳过 " + skipSet.size + " 行未就绪）" : ""));
     const v = (s) => String(s == null ? "" : s).replace(/[\r\n]+/g, " ");
     // 剪贴板批量粘贴在腾讯文档上不可靠（2026/9/10 起静默失效：整块只落首格甚至整块丢失），
     // 改用逐格写入（writeCell 公式栏通道）+ 逐格校验，失败精确定位到单元格
-    log("开始逐格写入 E/F/G（共 " + (bottom - top + 1) + " 行 × 3 列）...");
+    log("开始逐格写入 E/F/G（共 " + (bottom - top + 1 - skipSet.size) + " 行 × 3 列）...");
     let writeErr = "";
     for (let r = top; r <= bottom && !writeErr; r++) {
+      if (skipSet.has(r)) { skippedCount++; log("[跳过] 行" + r + " 未就绪（无订单/待查询），本轮不写"); continue; }
       const w = web[r] || {};
       const vals = [["E", v(w.period)], ["F", v(w.phone)], ["G", v(w.tutor)]];
       for (const [col, val] of vals) {
@@ -334,7 +468,7 @@ async function batchExec() {
       if (!writeErr) log("[写入] 行" + r + " E/F/G 完成");
     }
     if (writeErr) {
-      db.prepare(`UPDATE complaints SET writeback_status='fail', writeback_msg=?, writeback_at=? WHERE sheet=? AND src_row BETWEEN ? AND ?`)
+      db.prepare(`UPDATE complaints SET writeback_status='fail', writeback_msg=?, writeback_at=? WHERE sheet=? AND src_row BETWEEN ? AND ? AND order_no != '' AND query_status <> 'pending'`)
         .run("批量回填失败：" + writeErr + "（已写入部分保留）", nowStr(), batchSheet, top, bottom);
       log("批量回填中止：" + writeErr + "（已写入部分保留，请人工核查后重跑）");
     }
@@ -379,12 +513,12 @@ async function batchExec() {
 	    }
 
 	    if (ok) {
-	      written = N;
+	      written = bottom - top + 1 - skipSet.size;
 	      const now = nowStr();
-	      db.prepare(`UPDATE complaints SET writeback_status='ok', writeback_msg='批量回填成功', writeback_at=? WHERE sheet=? AND src_row BETWEEN ? AND ? AND order_no != ''`)
+	      db.prepare(`UPDATE complaints SET writeback_status='ok', writeback_msg='批量回填成功', writeback_at=? WHERE sheet=? AND src_row BETWEEN ? AND ? AND order_no != '' AND query_status <> 'pending'`)
 	        .run(now, batchSheet, top, bottom);
 	      // 未掉落/过滤：无需钉钉，直接标记已处理
-	      db.prepare(`UPDATE complaints SET processed='是', processed_at=?, mismatch=0 WHERE sheet=? AND src_row BETWEEN ? AND ? AND (fill_period='系统未掉落' OR fill_tutor LIKE '%爱芯过滤%' OR fill_tutor LIKE '%正价课拦截%') AND order_no != ''`)
+	      db.prepare(`UPDATE complaints SET processed='是', processed_at=?, mismatch=0 WHERE sheet=? AND src_row BETWEEN ? AND ? AND query_status <> 'pending' AND (fill_period='系统未掉落' OR fill_tutor LIKE '%爱芯过滤%' OR fill_tutor LIKE '%正价课拦截%') AND order_no != ''`)
 	        .run(now, batchSheet, top, bottom);
 	      // 其他记录：回写完成后，若钉钉也已发送则标记已处理
 	      db.prepare(`UPDATE complaints SET processed='是', processed_at=? WHERE sheet=? AND src_row BETWEEN ? AND ? AND writeback_status='ok' AND ding_status='ok' AND order_no != ''
@@ -401,7 +535,7 @@ async function batchExec() {
 	        const wantE = normCell((web[top] || {}).period || "");
 	        rolledBack = e !== wantE;
 	      } catch (e3) { rolledBack = false; }
-	      db.prepare(`UPDATE complaints SET writeback_status='fail', writeback_msg=?, writeback_at=? WHERE sheet=? AND src_row BETWEEN ? AND ?`)
+	      db.prepare(`UPDATE complaints SET writeback_status='fail', writeback_msg=?, writeback_at=? WHERE sheet=? AND src_row BETWEEN ? AND ? AND order_no != '' AND query_status <> 'pending'`)
 	        .run("批量回填失败已回滚: " + reason, nowStr(), batchSheet, top, bottom);
 	      log("批量回填失败（" + reason + "），已撤销粘贴：" + (rolledBack ? "成功" : "未确认，请人工按 Ctrl+Z 撤销"));
 	    }
@@ -412,7 +546,7 @@ async function batchExec() {
 	    await ctx.close().catch(() => {});
 	    db.close();
 	  }
-	  console.log("__BATCH_JSON__" + JSON.stringify({ ok: !reason, phase:"exec", sheet:batchSheet, top, bottom, written, rolledBack, reason }));
+	  console.log("__BATCH_JSON__" + JSON.stringify({ ok: !reason, phase:"exec", sheet:batchSheet, top, bottom, written, skipped: skipSet.size, rolledBack, reason }));
 }
 
 if (BATCH) {

@@ -407,8 +407,7 @@ const server = http.createServer(async (req, res) => {
       const data = JSON.parse(body || "{}");
       const sheet = data.sheet || "AI";
       const phase = data.phase === "exec" ? "exec" : "check";
-      const pending = db.prepare("SELECT COUNT(*) n FROM complaints WHERE sheet=? AND query_status='pending'").get(sheet).n;
-      if (pending > 0) return json(res, 200, { ok: false, needWait: true, pending, phase });
+      // 不再拦截待查询行：batchCheck 的 skip 逻辑会跳过未就绪行，改动行补全由查询任务兜底
       // 检查是否有同类型任务已在运行
       if (jobState.running && jobState.type && jobState.type.includes("批量回填")) {
         return json(res, 200, { ok: false, reason: "已有批量回填任务在运行，请等待完成" });
@@ -430,6 +429,10 @@ const server = http.createServer(async (req, res) => {
           result = { ok: false, reason: (rr.err ? String(rr.err.message || "").split("\n")[0] : "") || tail || "无输出" };
         }
         jobState.lastResult = result;
+        // 校验发现源表改动行（refreshedIds）→ 自动排队查询补全，完成后即可回填
+        if (phase === "check" && result && result.ok && result.refreshedIds && result.refreshedIds.length) {
+          enqueueQuery(["--ids", result.refreshedIds.join(",")], "改动行补全");
+        }
         if (phase === "exec" && result && result.ok && dingAutoEnabled()) {
           enqueueDing(async () => { await runScript("notify.js", ["--auto"]); });
         }

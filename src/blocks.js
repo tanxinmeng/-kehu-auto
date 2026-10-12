@@ -275,3 +275,69 @@ export function extractFields(rec, sheet) {
 export function dateEquals(d, target) {
   return normDate(d) === normDate(target);
 }
+
+// 批量回填对齐比对（2026-10-12）：库内订单序列 vs 源表订单序列（行号→订单号 两个映射）。
+// 只要有订单的行参与序列比对（空白行插删体现为行号整体错位）。
+// 返回：
+//   { type:"clean" }                          完全一致（源表尾部超出 bottom 的新增行由调用方单独报告）
+//   { type:"shift", B, k, orphans }           第 B 行起整体偏移 k（>0 插行 / <0 删行）；
+//                                             orphans = 删行时从源表消失的库内订单所在行
+//   { type:"rows", changes:[{row,dbOrder,srcOrder}] }  无整体偏移，逐行差异（订单改动/新增/清除）
+// 判定规则：
+//   k>0（源表多 k 个订单）→ 需尾部对齐验证非空洞（srcSeq[i]==dbSeq[i-k] 订单一致且行差恰为 k），
+//     dbSeq[i0] 不存在 = 纯尾部追加 → 不是偏移；
+//   k<0（库多 k 个订单）→ 需有对齐前缀锚定（i0>0 或纯尾部删除），验证 srcSeq[i]==dbSeq[i-k]；
+//   k=0 且行号整体错位常量 krow → 插/删的是无订单的空白行（订单序列不变、行号平移）；
+//   以上证据不足 → 逐行 diff（调用方限制行数，超限报错走重新同步）。
+export function alignDiff(dbMap, srcMap, top, bottom, srcMax) {
+  const dbSeq = [], srcSeq = [];
+  for (let r = top; r <= bottom; r++) { const o = dbMap[r]; if (o) dbSeq.push({ row: r, order: o }); }
+  for (let r = top; r <= srcMax; r++) { const o = srcMap[r]; if (o) srcSeq.push({ row: r, order: o }); }
+  const n = Math.max(dbSeq.length, srcSeq.length);
+  let i0 = -1;
+  for (let i = 0; i < n; i++) {
+    const d = dbSeq[i], s = srcSeq[i];
+    if (!d || !s || d.order !== s.order || d.row !== s.row) { i0 = i; break; }
+  }
+  if (i0 < 0) return { type: "clean" };
+  const k = srcSeq.length - dbSeq.length;
+  const B = dbSeq[i0] ? dbSeq[i0].row : bottom + 1;
+  if (k > 0 && dbSeq[i0] && i0 + k < srcSeq.length) {
+    let ok = true;
+    for (let i = i0 + k; i < srcSeq.length; i++) {
+      const d = dbSeq[i - k], s = srcSeq[i];
+      if (!d || d.order !== s.order || s.row - d.row !== k) { ok = false; break; }
+    }
+    if (ok) return { type: "shift", B, k, orphans: [] };
+  }
+  if (k < 0 && (i0 > 0 || i0 === srcSeq.length)) {
+    let ok = true;
+    for (let i = i0; i < srcSeq.length; i++) {
+      const d = dbSeq[i - k], s = srcSeq[i];
+      if (!d || d.order !== s.order || s.row - d.row !== k) { ok = false; break; }
+    }
+    if (ok) {
+      const orphans = [];
+      for (let i = i0; i < i0 - k && i < dbSeq.length; i++) orphans.push(dbSeq[i].row);
+      return { type: "shift", B, k, orphans };
+    }
+  }
+  if (k === 0 && srcSeq[i0] && dbSeq[i0]) {
+    const krow = srcSeq[i0].row - dbSeq[i0].row;
+    if (krow !== 0) {
+      let ok = true;
+      for (let i = i0; i < srcSeq.length; i++) {
+        const d = dbSeq[i], s = srcSeq[i];
+        if (!d || d.order !== s.order || s.row - d.row !== krow) { ok = false; break; }
+      }
+      if (ok) return { type: "shift", B: dbSeq[i0].row, k: krow, orphans: [] };
+    }
+  }
+  const changes = [];
+  for (let r = top; r <= bottom; r++) {
+    const d = dbMap[r] || "", s = srcMap[r] || "";
+    if (d !== s && (d || s)) changes.push({ row: r, dbOrder: d, srcOrder: s });
+  }
+  if (!changes.length) return { type: "clean" };
+  return { type: "rows", changes };
+}

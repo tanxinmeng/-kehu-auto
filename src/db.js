@@ -103,7 +103,7 @@ export function openDb(dataDir) {
 
 export function upsertComplaint(db, rec) {
   const key = rec.dedup_key || (rec.sheet + "|" + rec.src_row);
-  const existing = db.prepare("SELECT id, query_status, processed, fill_period, fill_phone, fill_tutor, is_blank FROM complaints WHERE dedup_key = ?").get(key);
+  const existing = db.prepare("SELECT id, order_no, query_status, processed, fill_period, fill_phone, fill_tutor, is_blank FROM complaints WHERE dedup_key = ?").get(key);
   const now = new Date().toISOString();
   if (existing) {
     // ????????????????????/??????????????????????
@@ -123,6 +123,17 @@ export function upsertComplaint(db, rec) {
         rec.processed_at ?? null, rec.processed_at ?? null,
         rec.query_remark ?? null, rec.query_remark ?? null,
         key);
+    // 源表为准（2026-10-12）：订单号被改动 → 旧查询结果属于旧订单，作废待重查；
+    // 订单被清空 → 该行按源表置 blank。查询结果（期次/电话/助教）绝不跨订单复用。
+    const srcOrder = String(rec.order_no || "");
+    const oldOrder = String(existing.order_no || "");
+    if (oldOrder && srcOrder && srcOrder !== oldOrder) {
+      db.prepare(`UPDATE complaints SET fill_period=NULL, fill_phone=NULL, fill_tutor=NULL, query_status='pending', processed='', processed_at=NULL, writeback_status='', writeback_msg='', mismatch=0, query_remark=? WHERE dedup_key=?`)
+        .run("源表订单号已改动(" + oldOrder + "→" + srcOrder + ")，旧查询结果作废，需重新查询", key);
+    } else if (oldOrder && !srcOrder) {
+      db.prepare(`UPDATE complaints SET fill_period=NULL, fill_phone=NULL, fill_tutor=NULL, query_status='blank', processed='', writeback_status='', mismatch=0, query_remark=? WHERE dedup_key=?`)
+        .run("源表该行订单已删除/清空，按源表清除", key);
+    }
     return { inserted: false, id: existing.id };
   }
   db.prepare(`INSERT INTO complaints
