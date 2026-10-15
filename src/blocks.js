@@ -252,6 +252,10 @@ export function parseCopyWithBlanks(text) {
   return rows;
 }
 
+// 哆啦导出的空单元格是 "#N/A" 字符串（见 web-chat 同款坑）：不当清洗会被当真实值
+// 直接入库并跳过查询，钉钉还会拿 "#N/A" 当顾问去搜人
+const naClean = (v) => { const t = String(v == null ? "" : v).trim(); return /^#N\/A$/i.test(t) ? "" : t; };
+
 export function extractFields(rec, sheet) {
   const ep = rec.endParts || [];
   const cText = [rec.startC, ...rec.contC].join("\n");
@@ -261,12 +265,12 @@ export function extractFields(rec, sheet) {
     cust_no: rec.cust_no,
     order_no: rec.order_no || extractOrder(cText),
     customer_info: cText,
-    category: (ep[1] || "").trim(),          // D
-    src_period: (ep[2] || "").trim(),        // E
-    src_phone: (ep[3] || "").trim(),         // F
-    src_tutor: (ep[4] || "").trim(),         // G
-    src_feedback: (ep[5] || "").trim(),      // 顾问反馈结果（AI-H / 高-I）
-    review: (ep[6] || "").trim(),            // J 复核用户需求
+    category: naClean(ep[1]),          // D
+    src_period: naClean(ep[2]),        // E
+    src_phone: naClean(ep[3]),         // F
+    src_tutor: naClean(ep[4]),         // G
+    src_feedback: naClean(ep[5]),      // 顾问反馈结果（AI-H / 高-I）
+    review: naClean(ep[6]),            // J 复核用户需求
     sheet,
   };
 }
@@ -289,7 +293,16 @@ export function dateEquals(d, target) {
 //   k<0（库多 k 个订单）→ 需有对齐前缀锚定（i0>0 或纯尾部删除），验证 srcSeq[i]==dbSeq[i-k]；
 //   k=0 且行号整体错位常量 krow → 插/删的是无订单的空白行（订单序列不变、行号平移）；
 //   以上证据不足 → 逐行 diff（调用方限制行数，超限报错走重新同步）。
-export function alignDiff(dbMap, srcMap, top, bottom, srcMax) {
+export function alignDiff(dbMap, srcMap, top, bottom, srcMax, covered) {
+  // 覆盖判定：调用方传入复制实际覆盖的行区间集合（主段+补段）。未传时退回旧的
+  // "r <= srcMax" 近似——近似在补段抬高 srcMax 后会漏掉中间的洞，所以批量检查必须传区间。
+  const inCover = (r) => {
+    if (Array.isArray(covered) && covered.length) {
+      for (const [lo, hi] of covered) if (r >= lo && r <= hi) return true;
+      return false;
+    }
+    return r <= srcMax;
+  };
   const dbSeq = [], srcSeq = [];
   for (let r = top; r <= bottom; r++) { const o = dbMap[r]; if (o) dbSeq.push({ row: r, order: o }); }
   for (let r = top; r <= srcMax; r++) { const o = srcMap[r]; if (o) srcSeq.push({ row: r, order: o }); }
@@ -318,8 +331,14 @@ export function alignDiff(dbMap, srcMap, top, bottom, srcMax) {
     }
     if (ok) {
       const orphans = [];
-      for (let i = i0; i < i0 - k && i < dbSeq.length; i++) orphans.push(dbSeq[i].row);
-      return { type: "shift", B, k, orphans };
+      let uncovered = false;
+      for (let i = i0; i < i0 - k && i < dbSeq.length; i++) {
+        // 孤儿行不在复制覆盖范围内 → 很可能是 A 列空档截断了复制而非源表真删，
+        // 不判删除，落到下方逐行 diff（有覆盖守卫，不会误清）
+        if (!inCover(dbSeq[i].row)) { uncovered = true; break; }
+        orphans.push(dbSeq[i].row);
+      }
+      if (!uncovered) return { type: "shift", B, k, orphans };
     }
   }
   if (k === 0 && srcSeq[i0] && dbSeq[i0]) {
@@ -334,7 +353,10 @@ export function alignDiff(dbMap, srcMap, top, bottom, srcMax) {
     }
   }
   const changes = [];
+  // 只在复制实际覆盖到的区间内逐行 diff：区间之外的行复制根本没读到（A 列空档截断、
+  // 主段与补段之间的洞等），不能据此判"源表已删除"清库（2026-10-13 2549 事故）
   for (let r = top; r <= bottom; r++) {
+    if (!inCover(r)) continue;
     const d = dbMap[r] || "", s = srcMap[r] || "";
     if (d !== s && (d || s)) changes.push({ row: r, dbOrder: d, srcOrder: s });
   }

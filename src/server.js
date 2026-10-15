@@ -47,18 +47,6 @@ function dingAutoEnabled() {  if (dingCfg.enabled === false) return false;
   const s = readDingSettings();
   return (s.auto === undefined) ? (dingCfg.autoSendOnWriteback !== false) : !!s.auto;
 }
-// 站点登录状态：看 session.json 里 yuaiweiwu.com 域 cookie 是否过期（供界面亮红灯，不再靠猜）
-function siteLoginState() {
-  try {
-    const s = JSON.parse(fs.readFileSync(path.join(dataDir, "session.json"), "utf8"));
-    const now = Date.now() / 1000;
-    const siteCookies = (s.cookies || []).filter(c => /yuaiweiwu\.com$/i.test((c.domain || "").replace(/^\./, "")));
-    if (!siteCookies.length) return { ok: false, reason: "站点从未登录或会话快照丢失，请重新登录站点" };
-    const maxExp = Math.max(...siteCookies.map(c => c.expires || 0));
-    if (maxExp > 0 && maxExp < now) return { ok: false, reason: "站点登录已于 " + new Date(maxExp * 1000).toLocaleString("zh-CN") + " 过期，请重新登录站点" };
-    return { ok: true, expiresAt: maxExp > 0 ? maxExp * 1000 : null };
-  } catch { return { ok: false, reason: "会话快照缺失，请重新登录站点" }; }
-}
 const AUTO_WRITEBACK = config.writeback && config.writeback.auto !== false;   // 网页勾"是"/填反馈后自动回写源表（可在 config.json 关闭）
 
 function json(res, code, obj) {
@@ -125,26 +113,65 @@ function findDwsBin() {
   });
 }
 
+// 备份只留最新 5 份：reset/delete-batch 每次都全量拷库，不清理会无限膨胀
+function pruneBackups() {
+  try {
+    const files = fs.readdirSync(dataDir)
+      .filter(f => /^backup_kehu_.*\.db$/.test(f))
+      .map(f => ({ f, m: fs.statSync(path.join(dataDir, f)).mtimeMs }))
+      .sort((a, b) => b.m - a.m);
+    for (const x of files.slice(5)) {
+      try { fs.unlinkSync(path.join(dataDir, x.f)); } catch {}
+    }
+  } catch (e) { console.log("[backup] 清理旧备份失败: " + e.message); }
+}
+
+// 每日自动备份：每天第一次巡检发现当天还没有备份时全量拷库一次（reset/delete-batch 的
+// 备份算数）。误删/事故时至少有一个当天早上的回退点，不再只能靠运气。
+let lastBackupDay = "";
+function dailyBackup() {
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    if (day === lastBackupDay) return;
+    const has = fs.readdirSync(dataDir).some(f => f.startsWith("backup_kehu_") && f.includes(day));
+    if (has) { lastBackupDay = day; return; }
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    fs.copyFileSync(path.join(dataDir, "kehu.db"), path.join(dataDir, "backup_kehu_" + new Date().toISOString().replace(/[:.]/g, "-") + ".db"));
+    pruneBackups();
+    lastBackupDay = day;
+    console.log("[backup] 每日自动备份完成");
+  } catch (e) { console.log("[backup] 每日备份失败: " + e.message); }
+}
+setInterval(dailyBackup, 10 * 60 * 1000).unref();
+
+// 当前正在运行的子进程：供「停止当前任务」强杀（同步/查询/回写/批量都是 node 子进程 + Playwright Edge）
+let currentChild = null, currentChildTag = "";
+function killTree(pid) { try { spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { timeout: 20000 }); return true; } catch { return false; } }
+
 // 运行脚本并收集输出
 function runScript(script, args, timeoutMs = 10 * 60 * 1000) {
   return new Promise((resolve) => {
     let done = false;
     const child = execFile(process.execPath, [path.join(ROOT, "src", script), ...args], { cwd: ROOT },
       (err, stdout, stderr) => { done = true; resolve({ err, stdout: String(stdout || ""), stderr: String(stderr || "") }); });
+    currentChild = child; currentChildTag = script;
     // 不用 execFile 自带 timeout：它只杀 node 本体，Playwright 拉起的 Edge 会残留占住 profile，
     // 导致后续批量任务卡死在启动阶段；必须 taskkill 整棵进程树
     const killer = setTimeout(() => {
       if (done) return;
       console.log("[runScript] " + script + " 超时，强杀进程树 pid=" + child.pid);
-      try { spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"]); } catch {}
+      killTree(child.pid);
     }, timeoutMs);
-    child.on("exit", () => { done = true; clearTimeout(killer); });
+    child.on("exit", () => {
+      done = true; clearTimeout(killer);
+      if (currentChild === child) { currentChild = null; currentChildTag = ""; }
+    });
   });
 }
 
 // 浏览器任务队列：同步/查询/回写 串行
 let jobChain = Promise.resolve();
-const jobState = { running: false, type: "", startedAt: null, doneAt: null, dingRunning: false, batchQueued: 0 };
+const jobState = { running: false, type: "", startedAt: null, doneAt: null, dingRunning: false, batchQueued: 0, cancelToken: null };
 // 钉钉发送专用队列：notify.js 只用 dws/webhook，不碰浏览器档案，可与补全/回写并行
 // （此前与浏览器任务共用一条串行队列，查询补全一跑几分钟，钉钉发送就得干等——点击后迟迟没反应的根因）
 let dingChain = Promise.resolve();
@@ -157,16 +184,24 @@ function enqueueDing(fn) {
   return dingChain;
 }
 let tencentLoginProc = null;   // 腾讯文档登录进程（无头截图二维码回传），退出后置 null
-let siteLoginProc = null;      // 站点登录进程（login.js 有头 Edge），存续期间禁止启动查询（profile 冲突）
-function enqueue(fn, type, timeoutMs = 5 * 60 * 1000) {  // 默认 5 分钟；长任务（批量检查/执行、回写批）传入更长超时
+let dingLoginProc = null;      // 钉钉设备登录进程（dws auth login），只保留最新一次
+// 默认 15 分钟：必须 ≥ runScript 的默认 10 分钟。此前默认 5 分钟 < 子进程 10 分钟，
+// 超时后 jobChain 提前放行下一个任务，上一个浏览器子进程还活着 → 双开浏览器撞 profile
+function enqueue(fn, type, timeoutMs = 15 * 60 * 1000) {  // 长任务（批量检查/执行、回写批）传入更长超时
   jobChain = jobChain.then(async () => {
     jobState.running = true;
     jobState.type = type || "任务";
     jobState.startedAt = Date.now();
     jobState.doneAt = null;
     jobState.lastResult = null;   // 新任务开始即清空上一任务的结果，避免旧失败串显
+    // 手动停止时立刻弃权：不等 fn 里被杀死的子进程走完收尾（否则「停止」后队列还会卡住）
+    jobState.cancelToken = { cancelled: false };
+    const token = jobState.cancelToken;
+    const cancelled = new Promise((_, reject) => {
+      token.reject = () => reject(new Error((type || "任务") + " 已被手动停止"));
+    });
     const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(type + " 超时（" + Math.round(timeoutMs / 60000) + "分钟）")), timeoutMs));
-    try { return await Promise.race([fn(), timeout]); }
+    try { return await Promise.race([fn(), cancelled, timeout]); }
     finally { jobState.running = false; jobState.doneAt = Date.now(); }
   }).catch(e => { console.log("[job] 出错: " + e.message); return { ok: false, reason: e.message }; });
   return jobChain;
@@ -231,18 +266,25 @@ function queryJobResult(r) {
 function enqueueQuery(args, type) {
   return enqueue(async () => {
     jobState.lastResult = null;
-    // 站点登录窗口还开着时严禁启动查询（profile 冲突会崩），等它退出并释放档案
-    if (siteLoginProc && siteLoginProc.exitCode === null) {
-      await new Promise((resolve) => {
-        const to = setTimeout(resolve, 10 * 60 * 1000);
-        siteLoginProc.once("exit", () => { clearTimeout(to); resolve(); });
-      });
-      await new Promise(r => setTimeout(r, 5000));
-    }
     const r = await runScript("site-query.js", args);
     jobState.lastResult = queryJobResult(r);
     return jobState.lastResult;
   }, type);
+}
+
+// 同步共用逻辑：跑 sync.js 并从输出判断真实成败（同步失败必须如实报错：此前无条件 ok:true，
+// copyFromRow 连续失败崩进程前端仍显示"同步完成"，用户以为同步好了实际一行都没入库）
+async function runSyncJob(sheet, startRow) {
+  return enqueue(async () => {
+    const r1 = await runScript("sync.js", ["--sheet", sheet, "--start-row", String(startRow)]);
+    const lines = String(r1.stdout || "").split("\n").filter(Boolean);
+    const done = lines.find(l => l.includes("同步完成"));
+    if (r1.err || !done) {
+      const errLine = String(r1.stderr || "").split("\n").filter(l => l.trim() && !l.includes("ExperimentalWarning") && !l.includes("trace-warnings") && !/^Node\.js v/.test(l.trim()) && !l.startsWith("file://") && !/^\s+at /.test(l)).pop();
+      return { ok: false, log: lines.slice(-4), err: r1.err ? (errLine || String(r1.err.message || "").split("\n")[0]) : "同步脚本未正常完成（无「同步完成」输出）" };
+    }
+    return { ok: true, log: lines.slice(-4), err: "" };
+  }, "同步");
 }
 
 const server = http.createServer(async (req, res) => {
@@ -276,7 +318,6 @@ const server = http.createServer(async (req, res) => {
         records: db.prepare("SELECT COUNT(*) n FROM complaints WHERE is_blank=0").get().n,
         pending: map.pending || 0, filled: map.filled || 0, not_found: map.not_found || 0, special: map.special || 0,
         nfWait: map.nf_wait || 0,
-        siteLogin: siteLoginState(),
         tencentLogin: tencentLoginState(),
         dingSent: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='ok'").get().n,
         dingFiltered: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='filtered'").get().n,
@@ -288,7 +329,40 @@ const server = http.createServer(async (req, res) => {
       const p2 = db.prepare(`SELECT processed, COUNT(*) n FROM complaints GROUP BY processed`).all();
       let syncState = {};
       try { syncState = JSON.parse(fs.readFileSync(path.join(dataDir, "sync_state.json"), "utf8")); } catch {}
-      json(res, 200, { status: s, processed: p2, total: db.prepare("SELECT COUNT(*) n FROM complaints").get().n, syncState, dingSent: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='ok'").get().n, dingFiltered: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='filtered'").get().n, dingFail: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='fail'").get().n });
+      // 起始行自动填充要用「最后一条真实数据行」而不是 sync_state.lastRow：
+      // lastRow 会把源表尾部连续入库的空白占位行也算进去（高表 lastRow=3407，真实数据只到 3405），
+      // 用 lastRow+1 会跳过 3406/3407 这两行空白——客服事后把空白行补录了就再也同步不到。
+      // is_blank=0 的最大行号 +1 才是真正的「下一行」（含尾部空白行，重新同步会顺带把它们读一遍）。
+      for (const sh of ["AI", "高"]) {
+        const mx = db.prepare("SELECT MAX(src_row) mx FROM complaints WHERE sheet=? AND is_blank=0").get(sh);
+        if (mx && mx.mx) syncState[sh] = { ...(syncState[sh] || {}), lastDataRow: mx.mx };
+      }
+      // 当日汇总：created_at 是 ISO(UTC)，按本地零点换算；processed_at/ding_at 是 zh-CN 本地格式
+      const dayStartIso = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
+      const todayCn = new Date().toLocaleDateString("zh-CN");
+      const today = {
+        synced: db.prepare("SELECT COUNT(*) n FROM complaints WHERE is_blank=0 AND created_at >= ?").get(dayStartIso).n,
+        processed: db.prepare("SELECT COUNT(*) n FROM complaints WHERE processed='是' AND processed_at LIKE ?").get(todayCn + "%").n,
+        ding: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='ok' AND ding_at LIKE ?").get(todayCn + "%").n,
+      };
+      // 源表质量巡检（现算现查，不入库不存状态，重新同步后自动消除）：
+      // 有效记录里缺订单号 / 手机号非 11 位纯数字 → 客服当天补录，别等查询/回填时才炸
+      const srcIssueWhere = `is_blank=0 AND ((order_no IS NULL OR order_no='') OR (src_phone IS NOT NULL AND src_phone<>'' AND (length(src_phone)<>11 OR src_phone GLOB '*[^0-9]*')))`;
+      const srcIssueCount = db.prepare(`SELECT COUNT(*) n FROM complaints WHERE ${srcIssueWhere}`).get().n;
+      const srcIssueItems = db.prepare(`SELECT sheet, src_row, order_no, src_phone FROM complaints WHERE ${srcIssueWhere} ORDER BY CASE WHEN sheet='AI' THEN 0 ELSE 1 END, src_row LIMIT 30`).all();
+      json(res, 200, { status: s, processed: p2, total: db.prepare("SELECT COUNT(*) n FROM complaints").get().n, today, srcIssues: { count: srcIssueCount, items: srcIssueItems }, syncState, dingSent: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='ok'").get().n, dingFiltered: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='filtered'").get().n, dingFail: db.prepare("SELECT COUNT(*) n FROM complaints WHERE ding_status='fail'").get().n });
+    } else if (p === "/api/stop" && req.method === "POST") {
+      // 停止当前任务：强杀正在跑的子进程树（node + Playwright Edge），并让队列立刻放弃这个任务。
+      // 行号填错/逻辑跑飞时不必干等 15 分钟超时，也不再依赖人工去任务管理器杀进程。
+      const stopped = [];
+      if (currentChild && currentChild.pid) {
+        stopped.push(currentChildTag + "(pid=" + currentChild.pid + ")");
+        killTree(currentChild.pid);
+      }
+      if (jobState.cancelToken && jobState.cancelToken.reject) jobState.cancelToken.reject();
+      // 子进程被杀 + 队列弃权后 running 由 finally 置回 false；这里不硬改，避免下一个任务开始后被误覆盖
+      console.log("[stop] 已停止：" + (stopped.join(", ") || "（当前无子进程在执行，已清空任务状态）"));
+      json(res, 200, { ok: true, message: stopped.length ? ("已停止 " + stopped.join(", ")) : "当前没有正在执行的子进程（已清空队列状态）", jobType: jobState.type || "" });
     } else if (p === "/api/reset" && req.method === "POST") {
       // 清空前自动备份整库：重置后数据只能靠源表重新同步找回，备份是最后保险
       try {
@@ -296,6 +370,7 @@ const server = http.createServer(async (req, res) => {
         db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
         const bak = path.join(dataDir, "backup_kehu_" + new Date().toISOString().replace(/[:.]/g, "-") + ".db");
         fs.copyFileSync(path.join(dataDir, "kehu.db"), bak);
+        pruneBackups();
       } catch (e) { console.log("[reset] 备份失败，中止清空: " + e.message); return json(res, 500, { ok: false, error: "备份失败，已中止清空: " + e.message }); }
       db.prepare("DELETE FROM complaints").run();
       try { fs.writeFileSync(path.join(dataDir, "sync_state.json"), "{}", "utf8"); } catch {}
@@ -316,6 +391,36 @@ const server = http.createServer(async (req, res) => {
       const rows = db.prepare(`SELECT * FROM complaints WHERE ${where} ORDER BY CASE WHEN sheet='AI' THEN 0 ELSE 1 END, src_row ASC LIMIT ? OFFSET ?`).all(...params, limit, offset);
       const total = db.prepare(`SELECT COUNT(*) n FROM complaints WHERE ${where}`).get(...params).n;
       json(res, 200, { rows, total, limit, offset });
+    } else if (p === "/api/sync-precheck" && req.method === "POST") {
+      // 同步前体检：起始行号填错（如把 3400 手滑成 2400）会把整段历史重新拉进来，
+      // 库内行号一变，网页「批量回填」默认范围跟着放大，回填 E/F/G 就会写到老行上（2026-10-14 事故）。
+      // 这里只算不写，把风险讲清楚交给用户确认。
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const data = JSON.parse(body || "{}");
+      const sheet = data.sheet || "AI";
+      const startRow = Number(data.startRow || 0);
+      if (!startRow || startRow < 3) return json(res, 400, { error: "起始行号需 >=3" });
+      const ag = db.prepare("SELECT MIN(src_row) mn, MAX(src_row) mx, COUNT(*) n FROM complaints WHERE sheet=? AND is_blank=0 AND order_no<>'' AND src_row IS NOT NULL").get(sheet);
+      if (!ag || !ag.mn) return json(res, 200, { ok: true, knownMin: 0, warn: "", message: "库内还没有 " + sheet + " 表的记录，这次同步即为首次拉取" });
+      // 会重新拉进来多少历史行：库里已存在、且行号 >= startRow 的有效记录数（同步是 upsert，只刷新不会重复）
+      const overlap = db.prepare("SELECT COUNT(*) n FROM complaints WHERE sheet=? AND is_blank=0 AND order_no<>'' AND src_row>=?").get(sheet, startRow).n;
+      const below = ag.n - overlap;
+      let warn = "";
+      if (startRow < ag.mn) {
+        const back = ag.mn - startRow;
+        warn = "起始行 " + startRow + " 比库内最小行号 " + ag.mn + " 还小，会把这段历史重新拉进来（约 " + overlap + " 行已在库内，另有 " + back + " 行范围是新的）";
+      } else if (startRow < ag.mx - 500) {
+        warn = "起始行 " + startRow + " 距库内最大行号 " + ag.mx + " 有 " + (ag.mx - startRow) + " 行，将会刷新这整段（约 " + overlap + " 行），通常只需从 " + (ag.mx + 1) + " 起增量同步";
+      }
+      json(res, 200, {
+        ok: true,
+        knownMin: ag.mn, knownMax: ag.mx, knownCount: ag.n,
+        overlapRows: overlap, lowerRows: below,
+        suggestRow: ag.mx + 1,
+        warn,
+        message: "库内 " + sheet + " 表现有 " + ag.n + " 条（行 " + ag.mn + "-" + ag.mx + "）；本次从第 " + startRow + " 行起，会刷新 " + overlap + " 条已有记录",
+      });
     } else if (p === "/api/sync" && req.method === "POST") {
       let body = "";
       for await (const chunk of req) body += chunk;
@@ -324,18 +429,7 @@ const server = http.createServer(async (req, res) => {
       const startRow = Number(data.startRow || 0);
       if (!startRow) return json(res, 400, { error: "缺少起始行号" });
       // 等待同步完成（约1分钟），返回结果；查询随后台队列继续
-      // 同步失败必须如实报错：此前无条件 ok:true，copyFromRow 连续失败崩进程前端仍显示"同步完成"，
-      // 用户以为同步好了，实际一行都没入库，查询再报"成功 0"彻底误导排查方向
-      const syncResult = await enqueue(async () => {
-        const r1 = await runScript("sync.js", ["--sheet", sheet, "--start-row", String(startRow)]);
-        const lines = String(r1.stdout || "").split("\n").filter(Boolean);
-        const done = lines.find(l => l.includes("同步完成"));
-        if (r1.err || !done) {
-          const errLine = String(r1.stderr || "").split("\n").filter(l => l.trim() && !l.includes("ExperimentalWarning") && !l.includes("trace-warnings") && !/^Node\.js v/.test(l.trim()) && !l.startsWith("file://") && !/^\s+at /.test(l)).pop();
-          return { ok: false, log: lines.slice(-4), err: r1.err ? (errLine || String(r1.err.message || "").split("\n")[0]) : "同步脚本未正常完成（无「同步完成」输出）" };
-        }
-        return { ok: true, log: lines.slice(-4), err: "" };
-      }, "同步");
+      const syncResult = await runSyncJob(sheet, startRow);
       json(res, 200, { ok: syncResult.ok !== false, result: syncResult });
       if (syncResult.ok !== false) enqueueQuery(["--sheet", sheet, "--limit", "500"], "查询补全");
     } else if (p === "/api/query" && req.method === "POST") {
@@ -384,7 +478,18 @@ const server = http.createServer(async (req, res) => {
       const ids = (data.ids || []).map(Number).filter(n => n > 0);
       if (!ids.length) return json(res, 400, { error: "缺少 ids" });
       const placeholders = ids.map(() => "?").join(",");
+      // 删除前先备份整库：批量删是不可逆操作，备份是最后保险（删完 2507-2548 段曾无法直接找回）
+      try {
+        db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        const bak = path.join(dataDir, "backup_kehu_" + new Date().toISOString().replace(/[:.]/g, "-") + ".db");
+        fs.copyFileSync(path.join(dataDir, "kehu.db"), bak);
+        pruneBackups();
+      } catch (e) {
+        console.log("[delete-batch] 备份失败，中止删除: " + e.message);
+        return json(res, 500, { ok: false, error: "备份失败，已中止删除: " + e.message });
+      }
       const n = db.prepare(`DELETE FROM complaints WHERE id IN (${placeholders})`).run(...ids).changes;
+      console.log("[delete-batch] 已备份并删除 " + n + " 条（ids=" + ids.slice(0, 10).join(",") + (ids.length > 10 ? "…" : "") + "）");
       json(res, 200, { ok: true, deleted: n });
     } else if (p === "/api/feedback" && req.method === "POST") {
       let body = "";
@@ -531,16 +636,12 @@ const server = http.createServer(async (req, res) => {
         userName,
         auto: (s.auto === undefined) ? (dingCfg.autoSendOnWriteback !== false) : !!s.auto,
       });
-    } else if (p === "/api/site/login" && req.method === "POST") {
-      // 站点一键重登：弹出自动化专用 Edge 窗口（login.js），登录态落在 profile + session.json
-      if (siteLoginProc && siteLoginProc.exitCode === null) {
-        return json(res, 200, { ok: true, message: "站点登录窗口已打开，请在弹出的 Edge 里登录站点" });
-      }
-      siteLoginProc = spawn(process.execPath, [path.join(ROOT, "src", "login.js")], { cwd: ROOT, stdio: "ignore", windowsHide: true });
-      siteLoginProc.on("exit", () => { siteLoginProc = null; });
-      json(res, 200, { ok: true, message: "正在打开自动化 Edge 窗口，请在窗口内登录 AI站/高中站，完成后关闭窗口" });
     } else if (p === "/api/tencent/login" && req.method === "POST") {
       // 无头后台打开登录框截图二维码，二维码回传到操作者浏览器，扫码后登录态落在终端 profile
+      // 浏览器任务运行中严禁开登录框（同 profile 双开会崩）
+      if (jobState.running) {
+        return json(res, 200, { ok: false, message: "正在" + (jobState.type || "执行任务") + "，浏览器占用中，请等任务完成后再登录" });
+      }
       let body = "";
       for await (const chunk of req) body += chunk;
       let force = false;
@@ -579,27 +680,40 @@ const server = http.createServer(async (req, res) => {
     } else if (p === "/api/ding/login" && req.method === "POST") {
       const bin = await findDwsBin();
       if (!bin) return json(res, 200, { ok: false, message: "未检测到 dws，请先安装：npm install -g dingtalk-workspace-cli" });
-      // spawn dws 后台轮询，读到验证码后立即返回响应但不 kill 进程
+      // dws 是 node 包装脚本，再 spawn vendor\dws.exe。中间多一层 cmd/node，且子进程的 stdout 可能
+      // 在包装层就丢掉了（表现为永远等不到设备码 →「设备码获取失败」）。改为只保留最新一次登录进程，
+      // 并同时监听 close/error，任何异常都如实回报给页面而不是静默超时。
+      if (dingLoginProc && dingLoginProc.exitCode === null) {
+        killTree(dingLoginProc.pid);   // dws 是包装脚本，只 kill 包装层会留下 vendor\dws.exe 孤儿
+        dingLoginProc = null;
+      }
       const safeBin = bin.replace(/\\/g, "/");
       const child = spawn(safeBin, ["auth", "login", "--device", "--no-browser"], { cwd: ROOT, shell: true, windowsHide: true });
+      dingLoginProc = child;
       let out = "";
       let sent = false;
-      const send = () => {
+      const finish = (payload) => {
         if (sent) return;
+        sent = true;
+        json(res, 200, payload);
+      };
+      const send = () => {
         const mCode = out.match(/[A-Z0-9]{4}-[A-Z0-9]{4}/);
         const mUrlWithCode = out.match(/https?:\/\/[^\s]*user_code=[^\s]+/);
         const mUrl = mUrlWithCode || out.match(/https?:\/\/[^\s]+/);
-        if (mCode && mUrl) {
-          sent = true;
-          json(res, 200, { ok: true, device: true, url: mUrl[0], code: mCode[0] });
-        }
+        if (mCode && mUrl) finish({ ok: true, device: true, url: mUrl[0], code: mCode[0] });
       };
       let debounce;
       const onData = (d) => { out += String(d); clearTimeout(debounce); debounce = setTimeout(send, 600); };
       child.stdout.on("data", onData);
       child.stderr.on("data", onData);
+      child.on("error", (e) => finish({ ok: false, message: "启动 dws 失败: " + e.message }));
+      child.on("close", (code) => {
+        send();   // 收尾再匹配一次：短输出可能没触发 debounce
+        if (!sent) finish({ ok: false, message: "dws 退出(code=" + code + ")但未输出设备码" + (out.trim() ? "：" + out.trim().slice(0, 200) : "") });
+      });
       // 10s 保护：如果还没匹配到也返回
-      setTimeout(() => { if (!sent) { sent = true; try { child.kill(); } catch (e) {} json(res, 200, { ok: false, message: "设备码获取失败" }); } }, 10000);
+      setTimeout(() => { if (!sent) { killTree(child.pid); finish({ ok: false, message: "设备码获取超时（dws 10 秒内未输出设备码）" }); } }, 10000);
       // dws 进程继续后台运行直到用户授权完成或超时
 	    } else if (p === "/api/ding/logout" && req.method === "POST") {
 	      const bin2 = await findDwsBin();
@@ -607,29 +721,38 @@ const server = http.createServer(async (req, res) => {
 	      const r2 = await runDws(bin2, ["auth", "logout", "-y"], 15000);
 	      json(res, 200, { ok: !r2.err, message: r2.err ? (r2.stderr || r2.err.message) : "已退出钉钉登录" });
 	    } else if (p === "/api/ding/switch-account" && req.method === "POST") {
-		      const bin3 = await findDwsBin();
-		      if (!bin3) return json(res, 200, { ok: false, message: "未检测到 dws" });
-		      await runDws(bin3, ["auth", "logout", "-y"], 15000);
-		      // spawn dws 后台轮询
-		      const safeBin3 = bin3.replace(/\\/g, "/");
-		      const child3 = spawn(safeBin3, ["auth", "login", "--device", "--no-browser"], { cwd: ROOT, shell: true, windowsHide: true });
-		      let out3 = "";
-		      let sent3 = false;
-		      const send3 = () => {
-		        if (sent3) return;
-		        const mCode = out3.match(/[A-Z0-9]{4}-[A-Z0-9]{4}/);
-		        const mUrlWithCode = out3.match(/https?:\/\/[^\s]*user_code=[^\s]+/);
-		        const mUrl = mUrlWithCode || out3.match(/https?:\/\/[^\s]+/);
-		        if (mCode && mUrl) {
-		          sent3 = true;
-		          json(res, 200, { ok: true, device: true, url: mUrl[0], code: mCode[0] });
-		        }
-		      };
-		      let debounce3;
-		      const onData3 = (d) => { out3 += String(d); clearTimeout(debounce3); debounce3 = setTimeout(send3, 600); };
-		      child3.stdout.on("data", onData3);
-		      child3.stderr.on("data", onData3);
-		      setTimeout(() => { if (!sent3) { sent3 = true; try { child3.kill(); } catch (e) {} json(res, 200, { ok: false, message: "切换失败" }); } }, 10000);} else if (p === "/api/ding/settings") {
+	      const bin3 = await findDwsBin();
+	      if (!bin3) return json(res, 200, { ok: false, message: "未检测到 dws" });
+	      await runDws(bin3, ["auth", "logout", "-y"], 15000);
+	      // 与 /api/ding/login 同一套：切换=先登出再设备登录，只保留最新一次登录进程，
+	      // 并监听 close/error，任何异常都如实回报页面，不再笼统地回一句「切换失败」。
+	      if (dingLoginProc && dingLoginProc.exitCode === null) {
+	        killTree(dingLoginProc.pid);
+	        dingLoginProc = null;
+	      }
+	      const safeBin3 = bin3.replace(/\\/g, "/");
+	      const child3 = spawn(safeBin3, ["auth", "login", "--device", "--no-browser"], { cwd: ROOT, shell: true, windowsHide: true });
+	      dingLoginProc = child3;
+	      let out3 = "";
+	      let sent3 = false;
+	      const finish3 = (payload) => { if (sent3) return; sent3 = true; json(res, 200, payload); };
+	      const send3 = () => {
+	        const mCode = out3.match(/[A-Z0-9]{4}-[A-Z0-9]{4}/);
+	        const mUrlWithCode = out3.match(/https?:\/\/[^\s]*user_code=[^\s]+/);
+	        const mUrl = mUrlWithCode || out3.match(/https?:\/\/[^\s]+/);
+	        if (mCode && mUrl) finish3({ ok: true, device: true, url: mUrl[0], code: mCode[0] });
+	      };
+	      let debounce3;
+	      const onData3 = (d) => { out3 += String(d); clearTimeout(debounce3); debounce3 = setTimeout(send3, 600); };
+	      child3.stdout.on("data", onData3);
+	      child3.stderr.on("data", onData3);
+	      child3.on("error", (e) => finish3({ ok: false, message: "启动 dws 失败: " + e.message }));
+	      child3.on("close", (code) => {
+	        send3();
+	        if (!sent3) finish3({ ok: false, message: "dws 退出(code=" + code + ")但未输出设备码" + (out3.trim() ? "：" + out3.trim().slice(0, 200) : "") });
+	      });
+	      setTimeout(() => { if (!sent3) { killTree(child3.pid); finish3({ ok: false, message: "设备码获取超时（dws 10 秒内未输出设备码）" }); } }, 10000);
+	    } else if (p === "/api/ding/settings") {
       if (req.method === "POST") {
         let body = "";
         for await (const chunk of req) body += chunk;
@@ -759,4 +882,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, () => {
   console.log("本地网页已启动: http://localhost:" + port);
   console.log("按 Ctrl+C 停止");
+  dailyBackup();   // 启动即查当天备份，服务在哪天首启就在哪天补上
 });
+

@@ -98,20 +98,38 @@ const fields = parsed.filter(x => x.kind === "record").map(x => extractFields(x.
 log(sheet + " 解析到 " + parsed.length + " 行（其中含订单号记录 " + fields.filter(f => f.order_no).length + " 条，空白/残留占位 " + parsed.filter(x => x.kind !== "record").length + " 行）");
 
 let anchorIdx = findAnchor(fields, anchorOrder2 || anchorOrder || "", anchorDate, anchorText);
-if ((anchorIdx === null || anchorIdx === undefined) && !copyFile && fields.length > 0) {
-  // C{startRow} 重试后仍读到空时锚点无法匹配——copyFromRow 固定从 startRow 开始复制且复制前
-  // 校验过名称框位置，首个记录块就是起始行，直接锚定（2026-09-16 行1609 C列读空事故）
-  log("[警告] C" + startRow + " 读取为空无法精确锚定，回退锚定首个记录块（复制固定从起始行开始）");
+let anchorBase = null;   // 兜底锚定时：起始行在复制文本里的相对行号
+// 兜底条件：锚点匹配不上，且没有订单号类锚点依据（C{startRow} 读空 → 订单/全文都为空）。
+// 起始行 A 列可能只有日期残留，不能把 anchorDate 当"有锚点依据"（日期不参与 findAnchor，会误判成硬失败）。
+const noAnchorHint = !(anchorOrder2 || anchorOrder) && !anchorText;
+if ((anchorIdx === null || anchorIdx === undefined) && noAnchorHint && parsed.length > 0) {
+  // C{startRow} 读空 = 起始行本身不是带订单的记录行（整行空白、只有日期的残留行，或表底渲染慢读空）。
+  // copyFromRow 固定从 A{startRow} 开始复制（复制前校验过名称框），所以**复制首行就是起始行**，
+  // 用 parsed[0].offset 对齐——它把起始行下方的空白/残留占位行一起算进去。
+  // 2026-10-14：原先按「首个记录块」对齐，起始行下方的空白/残留行被吞掉，其下所有真实记录行号
+  // 整体偏小 N 行（2026-10-13 日志里的「偏移 1」「对齐偏移」警告就是它）。起始行现在自动填
+  // 「最后一条数据行+1」，正落在源表尾部日期残留行上，不按复制首行对齐就会静默错行入库。
+  log("[警告] C" + startRow + " 读取为空（起始行不是带订单的记录行），按「复制首行=起始行」对齐，"
+    + parsed.length + " 行中带订单记录 " + fields.length + " 条");
   anchorIdx = 0;
+  anchorBase = parsed[0].offset ?? (parsed[0].rec && parsed[0].rec.offset) ?? 2;
 }
 if (anchorIdx === null || anchorIdx === undefined) {
   log("无法定位起始行 " + startRow + " 对应的块（起始行可能为空或未复制到）。请检查行号后重试。");
   db.close();
   process.exit(1);
 }
-const anchorOrderFound = fields[anchorIdx].order_no;
-const anchorOffset = fields[anchorIdx].offset ?? anchorIdx;
-log("锚点块索引 " + anchorIdx + " → 源表行 " + startRow + "（订单 " + anchorOrderFound + "），其后有 " + (fields.length - 1 - anchorIdx) + " 个块");
+const anchorOrderFound = fields[anchorIdx] ? fields[anchorIdx].order_no : "";
+const anchorOffset = anchorBase != null ? anchorBase : (fields[anchorIdx].offset ?? anchorIdx);
+if (!fields.length) {
+  // 起始行及其下全是空白/残留占位行 → 本次没有新记录，正常收尾（不再是「无法定位」报错）
+  log("起始行 " + startRow + " 及其下没有带订单的记录行（复制到 " + parsed.length + " 行全是空白/占位行），本次无新增");
+} else {
+  const anchorRealRow = startRow - anchorOffset + (fields[anchorIdx].offset ?? 0);
+  log("锚点块索引 " + anchorIdx + " → 源表行 " + anchorRealRow + "（订单 " + anchorOrderFound + "）"
+    + (anchorRealRow !== startRow ? "，起始行 " + startRow + " 上无记录行，其下 " + (anchorRealRow - startRow) + " 行先占位" : "")
+    + "，其后有 " + Math.max(0, fields.length - 1 - anchorIdx) + " 个块");
+}
 
 let inserted = 0, updated = 0, skipped = 0, srcFilled = 0, noOrder = 0, blanks = 0, lastInsertedRow = 0;
 const catFixes = [];   // 复制未含"问题归类"列时，待逐格读取 D 列补全的行

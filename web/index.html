@@ -509,17 +509,16 @@
   <h1>客诉内部处理表</h1>
   <div class="stats" id="stats"></div>
 </div>
-<div id="siteLoginBanner" style="display:none;background:#fff1f0;border:1px solid #ffa39e;color:#cf1322;padding:8px 14px;border-radius:8px;margin:6px 12px;font-size:13px;font-weight:600;">
-  ⚠ <span id="siteLoginMsg"></span>
-  <button onclick="siteRelogin()" style="margin-left:10px;background:#ff4d4f;color:#fff;border:none;border-radius:6px;padding:4px 12px;cursor:pointer;font-weight:600;">一键重新登录站点</button>
-</div>
 <div id="tencentLoginBanner" style="display:none;background:#fff7e6;border:1px solid #ffd591;color:#ad4e00;padding:8px 14px;border-radius:8px;margin:6px 12px;font-size:13px;font-weight:600;">
   ⚠ <span id="tencentLoginMsg"></span>
   <button onclick="tencentLogin()" style="margin-left:10px;background:#ff9c2c;color:#fff;border:none;border-radius:6px;padding:4px 12px;cursor:pointer;font-weight:600;">重新扫码登录腾讯文档</button>
 </div>
+<div id="srcIssueBanner" style="display:none;background:#fffbe6;border:1px solid #ffe58f;color:#ad6800;padding:8px 14px;border-radius:8px;margin:6px 12px;font-size:13px;font-weight:600;">
+  ⚠ <span id="srcIssueMsg"></span>
+</div>
 <div class="syncbar">
-  <div class="grp"><span class="badge ai">AI表</span> 从第 <input type="number" id="aiStart" min="3" placeholder="如 10880"> 行及以下 <button id="btnSyncAI" onclick="doSync('AI')">同步并查询</button></div>
-  <div class="grp"><span class="badge gao">高表</span> 从第 <input type="number" id="gaoStart" min="3" placeholder="如 2707"> 行及以下 <button id="btnSyncGao" onclick="doSync('高')">同步并查询</button></div>
+  <div class="grp"><span class="badge ai">AI表</span> 从第 <input type="number" id="aiStart" min="3" placeholder="自动填上次+1"> 行及以下 <button id="btnSyncAI" onclick="doSync('AI')">同步并查询</button></div>
+  <div class="grp"><span class="badge gao">高表</span> 从第 <input type="number" id="gaoStart" min="3" placeholder="自动填上次+1"> 行及以下 <button id="btnSyncGao" onclick="doSync('高')">同步并查询</button></div>
   <div class="grp"><button class="alt" onclick="doQuery()">查询补全(当前表)</button></div>
   <div class="grp"><button class="alt" id="btnBatchAI" onclick="batchFill('AI')">批量回填(AI表)</button></div>
   <div class="grp"><button class="alt" id="btnBatchGao" onclick="batchFill('高')">批量回填(高表)</button></div>
@@ -541,6 +540,7 @@
   <div class="dgrp" style="margin-left:12px;">
     <button class="alt" onclick="batchSendDingtalk()" title="批量发送未发/失败的单：二转发群，单聊发个人">批量发送钉钉</button>
     <button class="alt" onclick="load(PAGE,true)">刷新列表</button>
+    <button id="btnStop" onclick="stopJob()" title="强杀当前同步/查询/回写子进程（含后端浏览器），队列立即放行下一个任务" style="background:#fff1f0;color:#cf1322;border-color:#ffa39e;font-weight:700;">停止当前任务</button>
     <button onclick="resetTable()" style="background:#ff4d4f;color:#fff;border-color:#ff4d4f;">重置</button>
   </div>
 </div>
@@ -708,10 +708,29 @@ async function stats() {
     const map = {}; d.status.forEach(s=>map[s.query_status]=s.n);
     const pmap = {}; d.processed.forEach(s=>pmap[s.processed]=s.n);
     const ss = d.syncState || {};
+    // 行号一律按「真实数据行」算（lastDataRow = is_blank=0 的最大行号），空白占位行不计入；
+    // lastRow 会把源表尾部的空白占位行也算进去（高表 lastRow=3407，真实数据只到 3405）
+    const dataRow = (sheet) => (ss[sheet] && (ss[sheet].lastDataRow || ss[sheet].lastRow)) || 0;
     let syncInfo = "";
-    if (ss.AI && ss.AI.lastRow) syncInfo += ` | AI已同步到 ${ss.AI.lastRow} 行`;
-    if (ss["高"] && ss["高"].lastRow) syncInfo += ` | 高已同步到 ${ss["高"].lastRow} 行`;
-    $("stats").innerHTML = `共 <b>${d.total}</b> 条 | 待补全 <b>${map.pending||0}</b> | 已补全 <b>${map.filled||0}</b> | 特殊 <b>${map.special||0}</b> | 未掉落 <b>${map.not_found||0}</b> | 已处理 <b>${pmap["是"]||0}</b> | 钉钉已发 <b>${d.dingSent||0}</b> | 过滤 <b>${d.dingFiltered||0}</b> | 失败 <b>${d.dingFail||0}</b><span style="color:#cfe0ff">${syncInfo}</span>`;
+    if (dataRow("AI")) syncInfo += ` | AI已同步到 ${dataRow("AI")} 行`;
+    if (dataRow("高")) syncInfo += ` | 高已同步到 ${dataRow("高")} 行`;
+    // 起始行自动填充：默认「最后一条真实数据行 + 1」，省掉每次人工填（2026-10-14 手滑 3400→2400 事故的根因）
+    applySyncStart("AI", dataRow("AI"));
+    applySyncStart("高", dataRow("高"));
+    // 当日汇总条：今天新增同步 / 已处理 / 钉钉已发
+    const td = d.today || {};
+    const todayInfo = ` <span style="color:#cfe0ff">| 今日: 同步 <b>${td.synced||0}</b> · 处理 <b>${td.processed||0}</b> · 钉钉 <b>${td.ding||0}</b></span>`;
+    // 源表待补录：缺订单号/手机号异常的行，客服补录源表后重新同步自动消除
+    const si = d.srcIssues || { count: 0, items: [] };
+    const sb = $("srcIssueBanner");
+    if (sb) {
+      if (si.count > 0) {
+        const txt = si.items.map(it => it.sheet + "表第" + it.src_row + "行" + (!it.order_no ? " 缺订单号" : " 手机号异常(" + it.src_phone + ")")).join("；");
+        $("srcIssueMsg").textContent = "待补录 " + si.count + " 行（源表信息不全）： " + txt + (si.count > si.items.length ? " 等" : "") + " —— 在源表补录后点「同步并查询」自动消除";
+        sb.style.display = "block";
+      } else { sb.style.display = "none"; }
+    }
+    $("stats").innerHTML = `共 <b>${d.total}</b> 条 | 待补全 <b>${map.pending||0}</b> | 已补全 <b>${map.filled||0}</b> | 特殊 <b>${map.special||0}</b> | 未掉落 <b>${map.not_found||0}</b> | 已处理 <b>${pmap["是"]||0}</b> | 钉钉已发 <b>${d.dingSent||0}</b> | 过滤 <b>${d.dingFiltered||0}</b> | 失败 <b>${d.dingFail||0}</b>${todayInfo}<span style="color:#cfe0ff">${syncInfo}</span>`;
   } catch(e){}
 }
 function qs() {
@@ -1135,17 +1154,10 @@ async function saveFeedback(el) {
   if (d.writeback === "started") { setMsg("反馈已保存，正在后台回写源表 H/I（自动刷新中）"); startPoll(); }
 }
 function setMsg(m, color) { const el = $("syncmsg"); el.textContent = m; el.style.color = color || "#1f6e43"; }
-// 站点登录状态：过期/缺失 → 页面顶部红横幅，一键重登（自动化 Edge 窗口），恢复后自动收起
-let _siteLoginTimer = null;
+// 腾讯文档登录状态：过期/缺失 → 页面顶部橙横幅，重新扫码；恢复后自动收起
 async function checkSiteLogin() {
   try {
     const d = await (await fetch("/api/status", { cache: "no-store" })).json();
-    const sl = d.siteLogin || {};
-    const b = $("siteLoginBanner");
-    if (sl.ok) { b.style.display = "none"; } else {
-      $("siteLoginMsg").textContent = sl.reason || "站点登录状态未知，请重新登录";
-      b.style.display = "block";
-    }
     const tl = d.tencentLogin || {};
     const tb = $("tencentLoginBanner");
     if (tb) {
@@ -1156,25 +1168,7 @@ async function checkSiteLogin() {
     }
   } catch(e) {}
 }
-async function siteRelogin() {
-  try {
-    const d = await (await fetch("/api/site/login", { method: "POST" })).json();
-    setMsg(d.message || "正在打开自动化 Edge 窗口…", "#1677ff");
-    showToast(d.message || "已打开登录窗口", "#1677ff");
-    clearInterval(_siteLoginTimer);
-    _siteLoginTimer = setInterval(async () => {
-      try {
-        const d2 = await (await fetch("/api/status", { cache: "no-store" })).json();
-        if (d2.siteLogin && d2.siteLogin.ok) {
-          clearInterval(_siteLoginTimer);
-          setMsg("站点登录已恢复 ✓ 可以正常补全了", "#1f6e43");
-          checkSiteLogin();
-        }
-      } catch(e) {}
-    }, 5000);
-  } catch(e) { showToast("打开登录窗口失败", "#ef4444"); }
-}
-var _toastTimer = null;
+
 function showToast(msg, color, el) {
   var t = document.getElementById("toast");
   if (!t) return;
@@ -1191,11 +1185,39 @@ function showToast(msg, color, el) {
   _toastTimer = setTimeout(function() { t.classList.remove("show"); }, 1800);
 }
 
+// 起始行自动填充：默认「上次同步到的行 + 1」，不用每次人工填（人工填错=历史行被重新同步进来的根因）
+const _syncLast = {};   // sheet → 上次同步到的行号
+function applySyncStart(sheet, lastRow) {
+  const el = sheet === "AI" ? $("aiStart") : $("gaoStart");
+  if (!el) return;
+  const n = Number(lastRow) || 0;
+  if (n < 2) return;
+  _syncLast[sheet] = n;
+  if (el.dataset.userEdited === "1") return;   // 用户本次手填过且还没同步成功 → 不覆盖
+  const v = String(n + 1);
+  if (el.value !== v) el.value = v;
+  el.dataset.auto = v;
+}
+// 同步成功/被取消后：丢掉"手填"标记，回到自动值
+function resumeSyncAuto(sheet) {
+  const el = sheet === "AI" ? $("aiStart") : $("gaoStart");
+  if (el) el.dataset.userEdited = "";
+  applySyncStart(sheet, _syncLast[sheet]);
+}
 async function doSync(sheet) {
   const input = sheet === "AI" ? $("aiStart") : $("gaoStart");
   const startRow = Number(input.value);
   if (!startRow || startRow < 3) { setMsg("请先输入起始行号（>=3），如 " + (sheet === "AI" ? "10870" : "2707"), "#ff4d4f"); return; }
   if (syncing) { setMsg("已有同步/查询在进行中，请稍候...", "#ff4d4f"); return; }
+  // 同步前体检：起始行号填错（3400 手滑成 2400）会把整段历史重新拉进来，库内行号一变，
+  // 批量回填的默认范围就跟着放大，E/F/G 会写到老行上（2026-10-14 事故）。风险先说清楚。
+  try {
+    const pre = await (await fetch("/api/sync-precheck", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({sheet, startRow}) })).json();
+    if (pre && pre.warn) {
+      const ok = confirm("【同步行号提醒】" + pre.warn + "\n\n" + (pre.message || "") + "\n\n建议起始行：" + (pre.suggestRow || "") + "\n\n仍要按 " + startRow + " 行同步吗？");
+      if (!ok) { setMsg("已取消同步（行号未确认）：" + pre.warn + "，已恢复自动行号", "#b8860b"); resumeSyncAuto(sheet); return; }
+    }
+  } catch (e) { /* 体检失败不阻断同步 */ }
   syncing = true;
   $("btnSyncAI").disabled = true; $("btnSyncGao").disabled = true;
   setMsg((sheet === "AI" ? "AI表" : "高表") + " 正在从第 " + startRow + " 行同步（约1分钟，请勿关闭页面）...");
@@ -1209,6 +1231,7 @@ async function doSync(sheet) {
       return;
     }
     setMsg((sheet === "AI" ? "AI表" : "高表") + " 同步完成：" + (summary || "（无输出）") + "（查询补全已后台开始，自动刷新中）");
+    resumeSyncAuto(sheet);   // 同步成功，下次回到「上次同步行+1」自动值
     await new Promise(r2 => setTimeout(r2, 1200));
     load(0, true);
     startPoll();
@@ -1218,6 +1241,26 @@ async function doSync(sheet) {
     syncing = false;
     $("btnSyncAI").disabled = false; $("btnSyncGao").disabled = false;
   }
+}
+async function stopJob() {
+  if (!confirm("【停止当前任务】将强杀正在执行的同步/查询/回写子进程（含后端浏览器窗口）。\n\n正在写入源表的回填可能停在半途（已写入的部分保留，需人工核查后重跑）。确定停止吗？")) return;
+  setMsg("正在停止当前任务...", "#b8860b");
+  try {
+    const r = await fetch("/api/stop", { method:"POST", headers:{"Content-Type":"application/json"}, body: "{}" });
+    const d = await r.json();
+    setMsg((d.ok ? "✓ " : "✗ ") + (d.message || "未知结果"), d.ok ? "#b8860b" : "#ff4d4f");
+    stopPoll();
+    syncing = false; enableBtns();
+    // 等进程真正退出，再刷新一次状态（running 由服务端 finally 置回 false）
+    setTimeout(async () => {
+      try {
+        const st = await (await fetch("/api/status", { cache:"no-store" })).json();
+        if (st.running) setMsg("停止请求已发出，但任务仍在收尾（" + (st.type || "") + "），稍等几秒再点一次", "#b8860b");
+        else setMsg("已停止当前任务，可以重新发起同步/回填了", "#1f6e43");
+      } catch (e) {}
+      load(PAGE, true);
+    }, 3000);
+  } catch (e) { setMsg("停止失败: " + e.message, "#ff4d4f"); }
 }
 async function resetTable() {
   if (!confirm("【危险操作】将清空全部客诉记录（AI表+高表），清空前会自动备份数据库。\n清空后需要从源表重新同步才能恢复数据。确定要清空吗？")) return;
@@ -1633,6 +1676,15 @@ function onFilterChange() { PAGE = 0; load(0); }
 $("fQ").addEventListener("keydown", e => { if (e.key === "Enter") load(0); });
 $("aiStart").addEventListener("keydown", e => { if (e.key === "Enter") doSync("AI"); });
 $("gaoStart").addEventListener("keydown", e => { if (e.key === "Enter") doSync("高"); });
+// 只标记"用户手改过"：直接 load 时写入的自动值（等于 dataset.auto）不算手改
+["aiStart","gaoStart"].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener("input", () => {
+    if (el.value !== (el.dataset.auto || "")) el.dataset.userEdited = "1";
+    else el.dataset.userEdited = "";
+  });
+});
 try {
   const saved = JSON.parse(localStorage.getItem("kehu_ui") || "{}");
   if (saved.sheet) $("fSheet").value = saved.sheet;
