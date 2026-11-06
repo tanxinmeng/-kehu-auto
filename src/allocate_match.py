@@ -7,10 +7,13 @@
 
 已分配底表格式：「自营-店铺底表」，关键列 外部订单编号 + 服务期。
 支持传多份（最近一期持续更新 + 上一期留存），订单号集合自动合并。
+2026-11-04 起支持 --db：直接从期次库（kehu.db 的 alloc_orders）读，
+当前期次 + 全部历史期次一次性参与匹配，页面上的两个固定槽位不再是唯一来源。
 
 用法：
   python allocate_match.py --table <哆啦表.xlsx> \
       --allocated <已分配表1.xlsx> [--allocated <已分配表2.xlsx>] --out <输出.xlsx>
+  python allocate_match.py --table <哆啦表.xlsx> --db <kehu.db>
 
 输出：成品表 + stdout 最后一行 JSON{ok,total,matched,unmatched,files,periods,output}
 """
@@ -66,7 +69,8 @@ def load_allocated(path):
 def main():
     ap = argparse.ArgumentParser(description="已分配订单匹配（写是否分配列）")
     ap.add_argument("--table", required=True, help="哆啦导出表（已加渠道列）")
-    ap.add_argument("--allocated", action="append", required=True, help="已分配底表，可重复传多份")
+    ap.add_argument("--allocated", action="append", default=[], help="已分配底表，可重复传多份")
+    ap.add_argument("--db", default=None, help="期次库（kehu.db），传了就不再读 xlsx 底表")
     ap.add_argument("--out", default=None, help="输出路径（默认 <表名>_分配.xlsx）")
     args = ap.parse_args()
 
@@ -76,8 +80,8 @@ def main():
             print(json.dumps({"ok": False, "error": f"哆啦表不存在: {table_path}"}, ensure_ascii=False))
             return
         alloc_files = [p for p in args.allocated if os.path.exists(p)]
-        if not alloc_files:
-            missing = [p for p in args.allocated if not os.path.exists(p)]
+        if not alloc_files and not args.db:
+            missing = [p for p in (args.allocated or [])]
             print(json.dumps({"ok": False, "error": f"已分配底表不存在: {missing}"}, ensure_ascii=False))
             return
 
@@ -96,6 +100,25 @@ def main():
         # 合并所有已分配文件的订单号 → 服务期
         alloc_map = {}
         files_info = []
+        if args.db:
+            # 期次库：当前期次 + 全部历史期次都在一张表里，订单号唯一
+            import sqlite3
+            if not os.path.exists(args.db):
+                print(json.dumps({"ok": False, "error": f"期次库不存在: {args.db}"}, ensure_ascii=False))
+                return
+            conn = sqlite3.connect(args.db)
+            try:
+                cur = conn.execute("SELECT oid, period FROM alloc_orders")
+                periods = {}
+                for oid, period in cur:
+                    if oid and oid not in alloc_map:
+                        alloc_map[oid] = period or ""
+                        if period:
+                            periods[period] = periods.get(period, 0) + 1
+                files_info.append({"name": "期次库", "rows": sum(periods.values()) or len(alloc_map),
+                                   "periods": periods})
+            finally:
+                conn.close()
         for p in alloc_files:
             try:
                 orders, periods = load_allocated(p)

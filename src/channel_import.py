@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """批量导入渠道库：读取订单表（订单编号+渠道+商品名称+商品ID），
-提取 商品名称+商品ID+渠道 的唯一组合，去重后写入 channel_lib。"""
-import sys, os, sqlite3, json
+提取 商品名称+商品ID+渠道 的唯一组合，按商品ID覆盖写入 channel_lib
+（文件里出现的商品ID，旧记录整条换掉；没出现的商品保持不动）。"""
+import sys, os, sqlite3, json, time
 import pandas as pd
 
 def to_str(x):
@@ -50,17 +51,35 @@ def main():
 
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
+
+    # 覆盖语义：文件里出现的商品ID，旧记录全部换掉；文件里没有的商品保持不动
+    pid_list = list(dict.fromkeys(pid for (pid, _ch) in order))
+
+    # 删之前留一份快照，覆盖错了还能查回来
+    backup = []
+    for pid in pid_list:
+        for row in cur.execute("SELECT id, prod_name, prod_id, channel FROM channel_lib WHERE prod_id=?", (pid,)):
+            backup.append({"id": row[0], "prod_name": row[1], "prod_id": row[2], "channel": row[3]})
+
+    replaced = 0
+    bak_path = ""
+    for pid in pid_list:
+        cur.execute("DELETE FROM channel_lib WHERE prod_id=?", (pid,))
+        replaced += cur.rowcount
+    if backup:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        bak_path = os.path.join(os.path.dirname(db_path), f"channel_lib_backup_{ts}.json")
+        with open(bak_path, "w", encoding="utf-8") as f:
+            json.dump(backup, f, ensure_ascii=False, indent=1)
+
     inserted = 0
-    skipped = 0
     for (pid, ch) in order:
-        name = seen[(pid, ch)]
-        exists = cur.execute("SELECT id FROM channel_lib WHERE prod_id=? AND channel=?", (pid, ch)).fetchone()
-        if exists:
-            skipped += 1
-            continue
-        cur.execute("INSERT INTO channel_lib (prod_name, prod_id, channel) VALUES (?,?,?)", (name, pid, ch))
+        cur.execute("INSERT INTO channel_lib (prod_name, prod_id, channel) VALUES (?,?,?)", (seen[(pid, ch)], pid, ch))
         inserted += 1
     conn.commit()
+
+    # 文件里没出现的商品ID：原样保留
+    untouched = cur.execute("SELECT COUNT(*) FROM channel_lib").fetchone()[0] - inserted
     conn.close()
 
     print(json.dumps({
@@ -68,7 +87,9 @@ def main():
         "total": total,
         "unique": len(order),
         "inserted": inserted,
-        "skipped": skipped
+        "replaced": replaced,
+        "untouched": untouched,
+        "backup": bak_path if backup else ""
     }, ensure_ascii=False))
 
 if __name__ == "__main__":
